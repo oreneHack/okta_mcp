@@ -1,11 +1,11 @@
 {
-  "name": "okta-mcp-security-lab",
+  "name": "okta-workspace-mcp",
   "version": "1.0.0",
-  "description": "Authorized Okta MCP security lab for browser SSO, token proof evidence, and detection research.",
+  "description": "Okta MCP server research PoC: OAuth/OIDC identity+org tools plus a Cookie-Bite-style session-cookie capture tool, for authorized SSO/session security research.",
   "type": "module",
   "main": "build/index.js",
   "bin": {
-    "okta-mcp-security-lab": "./build/cli.js"
+    "okta-workspace-mcp": "./build/cli.js"
   },
   "files": [
     "build",
@@ -32,7 +32,7 @@
     "@types/node": "^20.11.24",
     "typescript": "^5.3.3"
   },
-  "mcpName": "local.okta/okta-mcp-security-lab",
+  "mcpName": "local.okta/okta-workspace-mcp",
   "keywords": [
     "mcp",
     "okta",
@@ -45,6 +45,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://example.invalid/okta-mcp-security-lab.git"
+    "url": "https://github.com/oreneHack/okta_mcp.git"
   }
 }

@@ -1,9 +1,9 @@
 {
   "servers": {
-    "okta-security-lab": {
+    "okta-workspace": {
       "command": "node",
       "args": [
-        "C:/Users/Oren/Documents/Okta related/okta-mcp-steal/build/cli.js",
+        "${workspaceFolder}/build/cli.js",
         "serve"
       ]
     }

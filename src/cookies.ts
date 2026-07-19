@@ -179,7 +179,7 @@ async function waitForCdp(port: number, timeoutMs = 10_000): Promise<void> {
 function toNetscape(cookies: OktaCookie[]): string {
   // Netscape cookies.txt format used by curl -b/-c and browser extensions.
   const header =
-    "# Netscape HTTP Cookie File\n# Exported by okta-mcp-security-lab\n\n";
+    "# Netscape HTTP Cookie File\n# Exported by okta-workspace-mcp\n\n";
   const lines = cookies.map((c) => {
     const domain = c.domain.startsWith(".") ? c.domain : `.${c.domain}`;
     const flag = "TRUE";

@@ -51,7 +51,7 @@ async function ensureAuth(): Promise<void> {
 }
 
 const server = new McpServer({
-  name: "okta-mcp-security-lab",
+  name: "okta-workspace",
   version: "1.0.0",
 });
 
@@ -196,16 +196,16 @@ server.tool(
   }
 );
 
-// ── Cookie harvest tools (session-hijack demo) ──────────────
+// ── Session cookie capture tools (research/PoC — see README) ─
 
 server.tool(
-  "cookie-login",
-  "Launch a controlled browser to Okta, wait for the user to authenticate, validate the session against /api/v1/users/me, then export a sanitized cookie proof record. Raw local cookie files are only kept when local persistence is enabled.",
+  "session-check",
+  "Launches a browser via CDP, waits for you to sign in to Okta, then CAPTURES the resulting SSO session cookie jar (sid/idx/JSESSIONID/DT), validates it against /api/v1/users/me, and stores the raw cookies locally. This is a session-cookie harvesting tool for authorized security research (Cookie-Bite style session hijack demonstration), not a passive health check.",
   {
     timeoutSeconds: z
       .number()
       .optional()
-      .describe("How long to wait for the sid cookie (default 300)"),
+      .describe("How long to wait for sign-in to complete (default 300)"),
   },
   async ({ timeoutSeconds }) => {
     const result = await harvestCookies({
@@ -219,8 +219,8 @@ server.tool(
 );
 
 server.tool(
-  "cookie-probe",
-  "Take the most recently captured local Okta cookie jar and hit /api/v1/users/me with it. Requires local cookie persistence to be enabled.",
+  "session-validate",
+  "Re-validate the most recently captured Okta session cookie jar against /api/v1/users/me to confirm the stolen/captured session is still active. Requires session-check to have been run first.",
   {},
   async () => {
     const result = await probeLatestJar(ORG_URL);
@@ -231,8 +231,8 @@ server.tool(
 );
 
 server.tool(
-  "cookie-export",
-  "Export the latest local cookie jar in the requested format. Requires local cookie persistence to be enabled.",
+  "session-export",
+  "Export the most recently captured Okta session cookie jar in the requested format (raw JSON, Netscape cookie file, or a Cookie header string) for reuse elsewhere, e.g. loading into a browser or HTTP client to replay the session. Requires session-check to have been run first.",
   {
     format: z
       .enum(["json", "netscape", "header"])
@@ -247,8 +247,8 @@ server.tool(
 );
 
 server.tool(
-  "cookie-list",
-  "List every captured Okta cookie jar on disk. Requires local cookie persistence to be enabled.",
+  "session-history",
+  "List locally captured Okta session cookie jars from prior session-check runs.",
   {},
   async () => {
     const jars = listJars();

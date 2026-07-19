@@ -105,7 +105,7 @@ async function init(): Promise<void> {
 
     const proofAnswer = await ask(
       rl,
-      "Enable local proof collector for security-lab evidence? y/N",
+      "Enable local session diagnostics collector? y/N",
       "N"
     );
     const proofEnabled = yes(proofAnswer);
@@ -136,8 +136,8 @@ async function init(): Promise<void> {
       JSON.stringify(
         {
           servers: {
-            "okta-security-lab": {
-              command: "okta-mcp-security-lab",
+            "okta-workspace": {
+              command: "okta-workspace-mcp",
               args: ["serve"],
             },
           },
@@ -176,14 +176,14 @@ function reset(): void {
 }
 
 function help(): void {
-  console.log(`okta-mcp-security-lab
+  console.log(`okta-workspace-mcp
 
 Commands:
   init         Configure Okta org URL and client ID
                Optional flags: --org-url, --client-id, --admin-scopes, --proof,
                --cookie-proof-url, --persist-cookie-jars
   serve        Start the MCP server
-  collector    Start the local lab evidence collector
+  collector    Start the local session diagnostics collector
   config       Print resolved config with redacted client ID
   config-path  Print user config path
   reset        Remove local config and token cache

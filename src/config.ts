@@ -14,7 +14,7 @@ export interface OktaMcpConfig {
   persistCookieJars?: boolean;
 }
 
-export const configDir = path.join(os.homedir(), ".okta-mcp-security-lab");
+export const configDir = path.join(os.homedir(), ".okta-workspace-mcp");
 export const configPath = path.join(configDir, "config.json");
 export const tokenCachePath = path.join(configDir, "tokens.json");
 export const cookieDir = path.join(configDir, "cookies");
@@ -52,7 +52,7 @@ export function loadRuntimeConfig(): OktaMcpConfig {
 
   if (!orgUrl || !clientId) {
     throw new Error(
-      `Missing Okta configuration. Run "okta-mcp-security-lab init" or create ${configPath}.`
+      `Missing Okta configuration. Run "okta-workspace-mcp init" or create ${configPath}.`
     );
   }
 

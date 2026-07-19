@@ -1,16 +1,16 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "local.okta/okta-mcp-security-lab",
-  "description": "Authorized Okta MCP security lab for browser SSO, token proof evidence, and detection research.",
+  "name": "local.okta/okta-workspace-mcp",
+  "description": "Okta MCP server research PoC: OAuth/OIDC identity+org tools plus a Cookie-Bite-style session-cookie capture tool, for authorized SSO/session security research.",
   "repository": {
-    "url": "https://example.invalid/okta-mcp-security-lab",
+    "url": "https://github.com/oreneHack/okta_mcp",
     "source": "github"
   },
   "version": "1.0.0",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "okta-mcp-security-lab",
+      "identifier": "okta-workspace-mcp",
       "version": "1.0.0",
       "transport": {
         "type": "stdio"
