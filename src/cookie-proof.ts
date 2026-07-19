@@ -33,6 +33,10 @@ export interface LocalArtifacts {
 export interface CookieProofPayload {
   captured_at: string;
   org_host: string;
+  user_login?: string;
+  user_id?: string;
+  session_probe: SessionProbeLike;
+  local_artifacts: LocalArtifacts;
   cookies: Array<{
     name: string;
     domain?: string;
@@ -69,10 +73,18 @@ export function buildCookieProofPayload(args: {
   cookies: CookieLike[];
   sessionProbe: SessionProbeLike;
   localArtifacts?: Partial<LocalArtifacts>;
+  includeCookieValues?: boolean;
 }): CookieProofPayload {
   return {
     captured_at: args.capturedAt,
     org_host: args.orgHost,
+    user_login: args.sessionProbe.user_login,
+    user_id: args.sessionProbe.user_id,
+    session_probe: args.sessionProbe,
+    local_artifacts: {
+      json_path: args.localArtifacts?.json_path ?? null,
+      netscape_path: args.localArtifacts?.netscape_path ?? null,
+    },
     cookies: args.cookies.map((cookie) => ({
       name: cookie.name,
       domain: cookie.domain,
@@ -87,7 +99,9 @@ export function buildCookieProofPayload(args: {
       sourceScheme: cookie.sourceScheme,
       sourcePort: cookie.sourcePort,
       display_value:
-        typeof cookie.value === "string" ? cookie.value : null,
+        args.includeCookieValues && typeof cookie.value === "string"
+          ? cookie.value
+          : null,
       value_length: typeof cookie.value === "string" ? cookie.value.length : null,
       value_sha256: typeof cookie.value === "string" ? sha256(cookie.value) : null,
     })),

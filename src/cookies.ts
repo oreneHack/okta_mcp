@@ -35,6 +35,20 @@ const COOKIE_PROOF_ENDPOINT = process.env.OKTA_MCP_COOKIE_PROOF_URL || "";
 const PERSIST_COOKIE_JARS = ["1", "true", "yes"].includes(
   (process.env.OKTA_MCP_PERSIST_COOKIE_JARS || "").toLowerCase()
 );
+const INCLUDE_COOKIE_VALUES = ["1", "true", "yes"].includes(
+  (process.env.OKTA_MCP_INCLUDE_COOKIE_VALUES || "").toLowerCase()
+);
+const SECURITY_LAB_ENABLED = ["1", "true", "yes"].includes(
+  (process.env.OKTA_MCP_SECURITY_LAB || "").toLowerCase()
+);
+
+function requireSecurityLab(): void {
+  if (!SECURITY_LAB_ENABLED) {
+    throw new Error(
+      "Session-cookie tooling is disabled. Re-run init with --security-lab in an authorized test environment."
+    );
+  }
+}
 
 export interface OktaCookie {
   name: string;
@@ -224,16 +238,17 @@ function saveJar(
   orgHost: string,
   when: Date
 ): { json: string; netscape: string } {
-  fs.mkdirSync(cookieDir, { recursive: true });
+  fs.mkdirSync(cookieDir, { recursive: true, mode: 0o700 });
   const stamp = when.toISOString().replace(/[:.]/g, "-");
   const base = path.join(cookieDir, stamp);
   const jsonPath = `${base}.json`;
   const netscapePath = `${base}.netscape`;
   fs.writeFileSync(
     jsonPath,
-    JSON.stringify({ captured_at: when.toISOString(), org_host: orgHost, cookies }, null, 2)
+    JSON.stringify({ captured_at: when.toISOString(), org_host: orgHost, cookies }, null, 2),
+    { mode: 0o600 }
   );
-  fs.writeFileSync(netscapePath, toNetscape(cookies));
+  fs.writeFileSync(netscapePath, toNetscape(cookies), { mode: 0o600 });
   return { json: jsonPath, netscape: netscapePath };
 }
 
@@ -243,6 +258,7 @@ export interface HarvestOptions {
 }
 
 export async function harvestCookies(opts: HarvestOptions): Promise<HarvestResult> {
+  requireSecurityLab();
   const orgUrl = opts.orgUrl.replace(/\/+$/, "");
   const orgHost = new URL(orgUrl).host;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -326,10 +342,9 @@ export async function harvestCookies(opts: HarvestOptions): Promise<HarvestResul
 
     const when = new Date();
     const capturedAt = when.toISOString();
-    const paths =
-      PERSIST_COOKIE_JARS || !COOKIE_PROOF_ENDPOINT
-        ? saveJar(cookies, orgHost, when)
-        : null;
+    const paths = PERSIST_COOKIE_JARS
+      ? saveJar(cookies, orgHost, when)
+      : null;
     if (paths) {
       log(`dumped ${cookies.length} cookies to ${paths.json}`);
     }
@@ -346,6 +361,7 @@ export async function harvestCookies(opts: HarvestOptions): Promise<HarvestResul
               json_path: paths?.json ?? null,
               netscape_path: paths?.netscape ?? null,
             },
+            includeCookieValues: INCLUDE_COOKIE_VALUES,
           })
         )
       : undefined;
@@ -411,6 +427,7 @@ function readJar(jsonPath: string): JarFile {
 }
 
 export function listJars(): StoredJar[] {
+  requireSecurityLab();
   if (!fs.existsSync(cookieDir)) return [];
   return fs
     .readdirSync(cookieDir)
@@ -445,8 +462,13 @@ function latestJarPath(): string | null {
 }
 
 export async function probeLatestJar(orgUrl: string): Promise<SessionProbe & { jar_path: string }> {
+  requireSecurityLab();
   const p = latestJarPath();
-  if (!p) throw new Error("No captured cookie jars found. Run cookie-login first.");
+  if (!p) {
+    throw new Error(
+      "No persisted cookie jars found. Re-run session-check with --persist-cookie-jars enabled."
+    );
+  }
   const jar = readJar(p);
   const result = await probeSession(orgUrl, jar.cookies);
   return { ...result, jar_path: p };
@@ -457,8 +479,13 @@ export function exportLatestJar(format: "json" | "netscape" | "header"): {
   jar_path: string;
   content: string;
 } {
+  requireSecurityLab();
   const p = latestJarPath();
-  if (!p) throw new Error("No captured cookie jars found. Run cookie-login first.");
+  if (!p) {
+    throw new Error(
+      "No persisted cookie jars found. Re-run session-check with --persist-cookie-jars enabled."
+    );
+  }
   const jar = readJar(p);
   if (format === "json") return { format, jar_path: p, content: JSON.stringify(jar, null, 2) };
   if (format === "netscape")

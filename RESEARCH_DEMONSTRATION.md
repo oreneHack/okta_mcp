@@ -2,133 +2,112 @@
 
 ## Purpose
 
-This research demonstrates how an MCP server can become a sensitive identity
-execution point on a user's local machine.
+This lab examines an identity-security boundary introduced by locally installed
+MCP servers. An MCP can provide useful Okta tools while also having the local
+process capabilities needed to open browsers, receive callbacks, cache tokens,
+and—if intentionally built to do so—observe authentication artifacts created in
+a browser it controls.
 
-The core point is not that Okta is uniquely broken. The point is that MCP servers
-run with local process capabilities, can open browsers, can receive localhost
-callbacks, can cache data, and can appear to the user as a helpful AI tool. That
-creates identity-security risks that are different from classic web phishing,
-browser extensions, or server-side OAuth abuse.
+The research does not claim an Okta authentication bypass. It demonstrates how
+trust in local AI tooling can place bearer tokens and browser sessions at risk.
 
-## Research Question
+Use only isolated tenants, applications, accounts, tokens, and sessions you are
+authorized to test.
 
-What can an untrusted or insufficiently reviewed MCP server do when a user adds it
-to an AI client such as VS Code, Claude Desktop, Cursor, or another MCP-capable
-assistant?
+## Capability tiers
 
-Specifically:
+### 1. Core identity
 
-- Can the MCP initiate an authentication flow that looks normal to the user?
-- Can the MCP receive OAuth tokens through a localhost callback?
-- What does Okta log when this happens?
-- What should defenders monitor to distinguish expected MCP use from risky or
-  unsanctioned identity access?
-
-## Demonstration Paths
-
-### 1. OAuth Client Path
-
-This is the current implemented lab.
-
-The MCP is configured as an OAuth/OIDC client. When the user invokes an Okta MCP
-tool, or when auth-on-start is enabled, the MCP opens the browser to Okta. The
-user authenticates normally. Okta redirects to the MCP's localhost callback. The
-MCP exchanges the authorization code with PKCE and receives tokens for that user.
-
-Flow:
+The normal MCP path uses OAuth 2.0 Authorization Code with PKCE. The user signs
+in on the hosted Okta page, Okta redirects to a localhost callback, and the MCP
+receives scoped OAuth tokens.
 
 ```text
-User adds MCP to VS Code
--> VS Code launches MCP server
--> MCP opens Okta browser authentication
--> user authenticates normally
+MCP starts
+-> hosted Okta authentication opens
+-> user completes authentication and MFA
 -> Okta redirects to localhost:8749/callback
--> MCP exchanges code for tokens
--> MCP caches tokens locally
--> MCP tools can call Okta APIs as the authenticated user
+-> MCP exchanges the authorization code with PKCE
+-> scoped tokens are cached locally
+-> identity tools operate as the user
 ```
 
-What this proves:
+This path is enabled in a normal installation. It does not read browser cookies,
+but it does receive and locally cache bearer tokens granted to the OAuth client.
 
-- MCP servers can legitimately receive Okta OAuth tokens.
-- The token flow looks like a normal OAuth grant to Okta.
-- The user may experience this as ordinary setup for a useful AI tool.
-- Detection should focus on OAuth client governance: client inventory, scopes,
-  redirect URI, consent, first-seen clients, and unusual token grants.
+### 2. Optional organization read
 
-What this does not prove:
+Read-only directory and application tools request explicit `okta.*` scopes and
+still depend on the user's Okta role or resource-set authorization. These scopes
+are not part of the default setup.
 
-- It does not bypass Okta authentication.
-- It does not bypass app registration requirements.
-- It does not silently steal credentials.
+### 3. Session-security lab
 
-### 2. Local Credential-Prompt Path
-
-This is a separate threat model, not the same as OAuth.
-
-An MCP server can run local code, open a browser, host a localhost page, or guide
-the user through an authentication-looking moment. If abused, that local position
-could be used for credential phishing.
-
-For ethical and safety reasons, this repository should not collect real Okta
-passwords or MFA material. A safe lab should use a mock identity page and dummy
-credentials only.
-
-Safe simulation flow:
+The session lab is disabled by default. When explicitly enabled, `session-check`
+launches a fresh Edge or Chrome profile with the Chrome DevTools Protocol,
+waits for the user to authenticate to the configured Okta organization, reads
+the cookies created in that controlled profile, and validates them against
+`/api/v1/users/me`.
 
 ```text
-User adds MCP to VS Code
--> MCP opens a mock local identity prompt
--> user enters dummy lab credentials
--> collector records that a local process could solicit secrets
--> article explains detection and prevention controls
+Authorized researcher invokes session-check
+-> MCP launches an isolated Chromium profile
+-> user authenticates on the real Okta page
+-> MCP observes the resulting session cookies through CDP
+-> MCP validates the session against /api/v1/users/me
+-> redacted evidence is posted to a loopback collector
 ```
 
-What this proves:
+The default proof contains cookie names, metadata, lengths, hashes, and the
+validated identity. Replayable values and local cookie jars require separate,
+explicit flags.
 
-- MCP servers can create convincing local authentication moments.
-- The risk is local execution plus user trust, not an Okta OAuth flaw.
-- Okta may see nothing until stolen credentials are later used.
-- Detection shifts from Okta-only logs to endpoint and MCP governance.
+## Important implementation distinction
 
-What this should not do:
+Startup OIDC authentication and the session lab are currently separate browser
+flows. Startup authentication uses the system browser and receives OAuth tokens.
+`session-check` uses a new CDP-controlled browser and observes that browser's
+session cookies.
 
-- It should not capture real Okta credentials.
-- It should not proxy or clone the real Okta login page.
-- It should not collect passwords, MFA codes, push approvals, recovery factors,
-  cookies, or session material.
+Do not edit a demonstration in a way that implies the current implementation
+secretly captures cookies during the normal OIDC callback. A future integrated
+lab flow must remain explicitly gated and documented.
 
-## Why Client ID Matters In The OAuth Path
+## Demonstration claim
 
-OAuth is always a relationship between a user and an application.
+A precise publication claim is:
 
-The Okta user proves who is signing in. The client ID identifies which app is
-requesting tokens.
+> MCP servers move identity risk into the local AI-tooling layer. A useful MCP
+> can legitimately initiate browser authentication and receive OAuth tokens.
+> A malicious or compromised MCP with browser-control capability could instead
+> observe the authenticated session created after the user completes MFA and
+> transmit replayable session material. Defenders therefore need MCP provenance,
+> OAuth-client governance, endpoint visibility, and session-replay detection.
 
-Okta uses the client ID to decide:
+## Safe recording controls
 
-- which redirect URIs are allowed
-- which scopes can be requested
-- whether refresh tokens are allowed
-- whether consent is required
-- whether PKCE is required
-- which users or groups are assigned
-- which policies apply
-- which OAuth client appears in System Log
+- Use a disposable Okta tenant and dedicated test identity.
+- Keep collectors on `127.0.0.1` for the publication lab.
+- Record hashes, names, timestamps, and successful validation—not raw values.
+- Use obvious `VICTIM` and `REPLAY` labels when demonstrating session reuse.
+- Avoid destructive or write-capable administrative actions.
+- Revoke sessions and refresh tokens immediately after recording.
+- Delete browser profiles, cookie jars, token caches, and collector output.
+- Never upload raw proof files to an issue, repository, editing service, or
+  shared drive.
 
-This means the OAuth-path demonstration requires a registered app or an allowed
-dynamic-registration process. If dynamic client registration is disabled and no
-app is registered, this path is blocked by design.
+## Detection surface
 
-That limitation is useful for the publication: it separates OAuth-client risk
-from local credential-prompt risk.
+### OAuth and client-governance signals
 
-## Detection Surface
+- first-seen or unsanctioned OAuth client ID
+- localhost redirect URI
+- `offline_access`
+- unexpected `okta.*` scopes
+- unusual client assignments or consent grants
+- token grants associated with unmanaged AI tooling
 
-### Okta System Log Signals
-
-For the OAuth-client path, review:
+Relevant Okta events can include:
 
 - `app.oauth2.authorize.code`
 - `user.authentication.sso`
@@ -137,51 +116,31 @@ For the OAuth-client path, review:
 - `app.oauth2.as.token.grant.id_token`
 - `user.consent.grant`, when consent is enabled
 
-Detection pivots:
+### Session-replay signals
 
-- first-seen OAuth client ID
-- localhost redirect URI
-- `offline_access`
-- `okta.*` management scopes
-- unusual client assignment
-- consent granted to an unsanctioned client
-- token grants from unmanaged AI tooling
+- session use from a new IP or ASN shortly after authentication
+- a browser or device fingerprint inconsistent with the original sign-in
+- activity from a session without a corresponding authentication event
+- administrative access immediately following suspected replay
+- impossible travel or geovelocity anomalies
+- reuse after explicit user logout or incident-response action
 
-### Endpoint And MCP Governance Signals
+### Endpoint and MCP-governance signals
 
-For the local credential-prompt path, review:
+- a new MCP server added to an AI client configuration
+- package installation from an unreviewed source
+- an MCP process spawning Edge or Chrome with remote debugging enabled
+- local HTTP callbacks and evidence collectors
+- token or cookie artifacts written under user-profile directories
+- AI tooling making outbound requests to previously unseen destinations
 
-- new MCP server added to VS Code or another AI client
-- MCP server process spawning a browser
-- local HTTP listeners on uncommon ports
-- browser navigation to localhost during "authentication"
-- MCP package provenance and install source
-- unexpected local credential prompts
-- files written under user profile MCP/plugin directories
+## Defensive recommendations
 
-## Defensive Recommendations
-
-- Maintain an approved MCP server inventory.
-- Require review for MCPs that open browsers, host localhost callbacks, or
-  request identity scopes.
-- Inventory Okta OAuth clients and alert on first-seen clients.
-- Alert on localhost redirect URIs for unsanctioned apps.
-- Monitor `offline_access` and `okta.*` scopes.
-- Educate users that MCP install prompts are equivalent to installing local code.
-- Prefer signed, reviewed, centrally managed MCP packages.
-- For sensitive Okta apps, use short token lifetimes, refresh token rotation,
-  DPoP where available, and strict client assignment.
-
-## Publication Claim
-
-A concise claim for the article:
-
-```text
-MCP servers move identity risk into the local AI-tooling layer. A sanctioned or
-malicious MCP can initiate browser authentication, receive OAuth tokens through a
-localhost callback, and operate as the user through normal-looking OAuth grants.
-If OAuth registration is blocked, the separate risk is local credential-prompt
-abuse: the MCP can still create authentication-looking moments that are visible
-primarily to endpoint and MCP governance controls, not to Okta's OAuth logs.
-```
-
+- Maintain an approved MCP inventory and pin reviewed versions.
+- Treat MCP installation as local code installation, not as a simple API link.
+- Review servers that open browsers, host callbacks, or request identity scopes.
+- Inventory OAuth clients and alert on first-seen clients and unusual scopes.
+- Prefer least-privilege roles, short lifetimes, refresh-token rotation, and
+  device-bound controls where supported.
+- Monitor endpoint process trees and outbound destinations for AI tooling.
+- Revoke both OAuth grants and browser sessions during incident response.

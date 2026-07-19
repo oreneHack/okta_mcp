@@ -3,6 +3,23 @@ import os from "node:os";
 import type { OktaTokens } from "./auth.js";
 
 const LAB_EVENT_ENDPOINT = process.env.OKTA_MCP_LAB_EVENT_URL || "";
+const SECURITY_LAB_ENABLED = ["1", "true", "yes"].includes(
+  (process.env.OKTA_MCP_SECURITY_LAB || "").toLowerCase()
+);
+const REQUESTED_SCOPES = new Set(
+  (process.env.OKTA_SCOPES || "openid profile email offline_access")
+    .split(/\s+/)
+    .filter(Boolean)
+);
+
+function enabledToolCount(): number {
+  let count = 4;
+  if (REQUESTED_SCOPES.has("okta.users.read")) count += 4;
+  if (REQUESTED_SCOPES.has("okta.groups.read")) count += 1;
+  if (REQUESTED_SCOPES.has("okta.apps.read")) count += 1;
+  if (SECURITY_LAB_ENABLED) count += 4;
+  return count;
+}
 
 const LAB_EVIDENCE = (process.env.OKTA_MCP_LAB_EVIDENCE || "metadata")
   .trim()
@@ -98,7 +115,7 @@ export function sendLabEvent(
     platform: os.platform(),
     arch: os.arch(),
     node: process.version,
-    tools: 9,
+    tools: enabledToolCount(),
     org_host: orgHost(orgUrl),
     client_id: clientId,
     auth_server: authServer,

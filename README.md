@@ -1,151 +1,133 @@
 # Okta Workspace MCP
 
-Okta MCP server research PoC — combines OAuth/OIDC identity and org-management
-tools with a Cookie-Bite-style session-cookie capture tool, built for
-authorized SSO/session security research and detection engineering.
+A community Model Context Protocol (MCP) server for inspecting Okta identity
+context, assigned resources, groups, and authorized directory data from an AI
+assistant.
 
-Use only with tenants, apps, users, and tokens you are authorized to test.
+The normal product path uses OAuth 2.0 Authorization Code with PKCE and starts
+with read-only OIDC scopes. An optional, off-by-default security lab demonstrates
+how a locally installed MCP could capture and replay browser session cookies in
+an authorized test environment.
 
-## Authentication
+This project is not affiliated with or endorsed by Okta. Use it only with
+tenants, applications, users, tokens, and sessions you are authorized to test.
 
-This server has **two distinct, independent authentication mechanisms**. Which
-one runs depends on which tool is called.
+## What it does
 
-### 1. OAuth 2.0 / OIDC Authorization Code + PKCE (identity & org tools)
+### Core identity tools
 
-Backs `whoami`, `userinfo`, `token-details`, `my-groups`, `my-apps`,
-`list-users`, `get-user`, `search-users`, `list-groups`, `list-apps`.
+These tools use ordinary OIDC authentication:
 
-1. The MCP opens the Okta hosted sign-in page in the system browser.
-2. The user authenticates normally against the org's configured factors.
-3. Okta redirects to `http://localhost:8749/callback` with an authorization code.
-4. The MCP exchanges the code (with the PKCE `code_verifier`) for an
-   `access_token` / `id_token` / `refresh_token`.
-5. Tokens are cached under the user's profile and silently renewed via the
-   refresh-token grant when they expire.
+| Tool | Purpose | Requirement |
+| --- | --- | --- |
+| `whoami` | Summarize the authenticated identity and token scopes | Default OIDC scopes |
+| `userinfo` | Read the profile returned by Okta `/userinfo` | `openid profile email` |
+| `token-details` | Inspect token metadata and claims without returning the bearer token | Authenticated session |
+| `my-groups` | Show groups included in the access-token claims | A configured `groups` claim |
 
-This is a normal, standards-based OIDC client flow — no credentials or
-cookies are captured, only a token scoped to what the app registration and
-user's role allow.
+### Optional organization-read tools
 
-### 2. Browser session-cookie capture (session tools)
+These tools call Okta management APIs. They require the matching `okta.*` OAuth
+scopes and an Okta role or resource set that authorizes the signed-in user:
 
-Backs `session-check`, `session-validate`, `session-export`, `session-history`.
+| Tool | Required scope |
+| --- | --- |
+| `my-apps` | `okta.users.read` |
+| `list-users`, `get-user`, `search-users` | `okta.users.read` |
+| `list-groups` | `okta.groups.read` |
+| `list-apps` | `okta.apps.read` |
 
-1. `session-check` launches Edge/Chrome with `--remote-debugging-port` and
-   drives it over the Chrome DevTools Protocol (CDP).
-2. It waits for the user to complete Okta sign-in in that browser, then polls
-   `Storage.getCookies` until an authenticated Okta session cookie
-   (`sid` / `idx` / `JSESSIONID` / `DT`) appears.
-3. The captured cookie jar is validated against `/api/v1/users/me` and stored
-   locally.
-4. `session-export` can re-emit that jar as raw JSON, a Netscape cookie file,
-   or a `Cookie:` header string — i.e. material that can be loaded into a
-   browser or HTTP client to replay the session.
+Organization-read tools are registered only when their corresponding scopes are
+present in the MCP configuration.
 
-This is deliberately a **session-hijack-style capture**, not a health check —
-it demonstrates the same primitive as the
-[Cookie-Bite](https://www.varonis.com/blog/cookie-bite-entra-id) technique,
-applied to Okta SSO sessions. Treat any exported jar as live credential
-material — do not share or commit it.
+The optional session-research tools are not registered in a normal
+installation. See [Authorized security lab](#authorized-security-lab).
 
-## Product Flow
+## Security model
 
-Intended user experience for the OAuth/OIDC tools:
+- Passwords and MFA values are entered only on the hosted Okta sign-in page.
+- The OAuth path receives scoped bearer tokens through a localhost callback; it
+  does not read browser cookies.
+- Access and optional refresh tokens are cached under the current user's
+  profile and tied to the configured tenant, client ID, authorization server,
+  and scopes.
+- Session-cookie tooling is disabled by default and must be explicitly enabled.
+- Cookie proof records contain hashes and lengths by default, not cookie values.
+- Configuration and credential artifacts are excluded from Git.
 
-```text
-VS Code starts MCP
--> MCP reads C:\Users\<user>\.okta-workspace-mcp\config.json
--> MCP connects over stdio
--> browser opens Okta SSO
--> user authenticates
--> Okta redirects to localhost:8749/callback
--> MCP exchanges code with PKCE
--> tokens are cached under the user's profile
--> Okta tools work in VS Code
-```
+MCP servers run as local processes with the permissions of the user who starts
+them. Review the source and package provenance before adding any third-party MCP
+server to an AI client.
 
-## Install (from this repository)
+## Requirements
 
-Clone and build from source — this is not published to a package registry:
+- Node.js 20 or newer
+- An Okta OIDC application in a tenant you control
+- An MCP-capable client such as VS Code
+- Windows with Microsoft Edge or Google Chrome for the optional session lab
+
+## Five-minute setup
+
+### 1. Create the Okta application
+
+Create an OIDC application with:
+
+1. Application type: **Single-Page Application**
+2. Grant type: **Authorization Code**
+3. Sign-in redirect URI: `http://localhost:8749/callback`
+4. Initial scopes: `openid profile email offline_access`
+5. Assignment to the users or groups allowed to use the MCP
+
+Copy the application client ID. No client secret is used; PKCE protects the
+authorization-code exchange.
+
+### 2. Install from source
+
+This project is not currently published to npm. Clone and pin the revision you
+intend to review and run:
 
 ```bash
 git clone https://github.com/oreneHack/okta_mcp.git
 cd okta_mcp
-npm install
+npm ci
 npm run build
 npm link
 ```
 
-After `npm link`, the command is available on your PATH as:
-
-```bash
-okta-workspace-mcp
-```
-
-(On Windows, run these from Git Bash/WSL or PowerShell equivalently — `npm
-link` works the same way.)
-
-## Initialize
-
-Run:
+### 3. Initialize
 
 ```bash
 okta-workspace-mcp init
 ```
 
-It asks for:
+The setup asks for the Okta organization URL and OIDC client ID. Keep
+organization-management scopes disabled for the first test.
 
-- Okta org URL, for example `https://your-org.okta.com`
-- Okta OIDC client ID
-- Whether to enable admin/org-management scopes
-- Whether browser auth should open when the MCP starts
-- Whether to enable the local proof/evidence collector
+Non-interactive setup is also available:
 
-Config is saved here:
-
-```text
-C:\Users\<user>\.okta-workspace-mcp\config.json
+```bash
+okta-workspace-mcp init \
+  --org-url "https://your-org.okta.com" \
+  --client-id "your-client-id"
 ```
 
-Token cache is saved here:
+Configuration is stored at:
 
 ```text
-C:\Users\<user>\.okta-workspace-mcp\tokens.json
+~/.okta-workspace-mcp/config.json
 ```
 
-Do not share or commit `tokens.json`.
-
-If proof mode is enabled, `session-check` posts a cookie proof record
-to the local collector:
+OAuth tokens are stored separately at:
 
 ```text
-http://127.0.0.1:8765/v1/cookie-proofs
+~/.okta-workspace-mcp/tokens.json
 ```
 
-By default, raw cookie jars are not persisted locally in proof mode. To keep
-local cookie artifacts too, initialize with `--persist-cookie-jars`.
-The local collector record includes `display_value` values that mirror the
-extracted cookie JSON exactly, so treat `collector-output\cookie-proof-*.json`
-as live credential material.
+Do not share or commit the token cache.
 
-## Okta App Setup
+### 4. Add the MCP to the client
 
-Create an OIDC app in the authorized Okta tenant:
-
-1. Application type: Single-Page Application
-2. Grant type: Authorization Code
-3. Sign-in redirect URI: `http://localhost:8749/callback`
-4. Scopes for first test: `openid profile email offline_access`
-5. Assign the authorized test user
-6. Copy the client ID into `okta-workspace-mcp init`
-
-For org-management API tools, choose org-management scopes during `init`.
-Those scopes still require matching Okta admin roles.
-
-## VS Code MCP Config
-
-After `npm link`, add this to your VS Code MCP configuration:
+After `npm link`, use:
 
 ```json
 {
@@ -158,117 +140,190 @@ After `npm link`, add this to your VS Code MCP configuration:
 }
 ```
 
-Okta settings live in the user-level config created by `init`, not in this
-file.
+For development from this repository, the checked-in `.vscode/mcp.json` runs
+`build/cli.js` through a workspace-relative path.
 
-If you're running from the cloned repo without `npm link`, the checked-in
-[.vscode/mcp.json](.vscode/mcp.json) in this repository uses a
-workspace-relative path (`${workspaceFolder}/build/cli.js`) so it works for
-any clone location, not just the original author's machine.
+### 5. Authenticate and use it
 
-## Simulate In VS Code
+Start or reload the MCP client. When `authOnStart` is enabled, the MCP opens the
+hosted Okta sign-in page. After authentication, Okta redirects to the localhost
+callback and the tools become available.
 
-1. Start or reload VS Code after adding the MCP config.
-2. VS Code launches `okta-workspace-mcp serve`.
-3. The browser opens to Okta if `authOnStart` is enabled.
-4. Authenticate with the authorized test user.
-5. Ask the assistant to use an Okta tool, for example:
+Example requests:
 
 ```text
-Use the Okta MCP and tell me who I am.
+Use the Okta MCP to tell me who I am.
 ```
 
-Useful tools:
+```text
+Use the Okta MCP to summarize my profile and group claims.
+```
 
-- `whoami`
-- `userinfo`
-- `token-details`
-- `my-groups`
-- `my-apps`
-- `list-users`
-- `get-user`
-- `search-users`
-- `list-groups`
-- `list-apps`
-- `session-check`
-- `session-validate`
-- `session-export`
-- `session-history`
+## Organization-read setup
 
-Org-management tools require org auth server, `okta.*` scopes, and admin roles.
+Run initialization with the read-only management-scope preset:
 
-## Lab Evidence Collector
+```bash
+okta-workspace-mcp init \
+  --org-url "https://your-org.okta.com" \
+  --client-id "your-client-id" \
+  --admin-scopes
+```
 
-If you enabled proof evidence during `init`, start the collector before starting
-VS Code:
+This selects the Okta organization authorization server and requests:
+
+```text
+openid profile email offline_access
+okta.users.read okta.groups.read okta.apps.read
+```
+
+Scopes do not replace Okta authorization. The signed-in user must still have a
+matching role or resource set. Prefer the smallest roles and scopes needed for
+the intended task.
+
+## Authentication flow
+
+```text
+MCP client starts the server
+-> server reads the local configuration
+-> browser opens the hosted Okta sign-in page
+-> user authenticates directly with Okta
+-> Okta redirects to http://localhost:8749/callback
+-> MCP exchanges the code with PKCE
+-> scoped tokens are cached locally
+-> Okta tools run as the authenticated user
+```
+
+## Authorized security lab
+
+The repository includes an optional research mode for demonstrating the risk of
+installing an untrusted local MCP. It launches an isolated Chromium browser,
+waits for an authorized Okta sign-in, reads the resulting session cookies
+through the Chrome DevTools Protocol, and validates the session against
+`/api/v1/users/me`.
+
+This mode handles live session credentials. Use only disposable test accounts,
+keep the collector bound to loopback, and revoke the session after testing.
+
+Enable the lab explicitly:
+
+```bash
+okta-workspace-mcp init \
+  --org-url "https://your-org.okta.com" \
+  --client-id "your-client-id" \
+  --security-lab \
+  --proof
+```
+
+Start the local evidence collector:
 
 ```bash
 okta-workspace-mcp collector
 ```
 
-For local repo development:
+The lab-only tools then become available:
 
-```bash
-npm run collector
-```
+- `session-check`
+- `session-validate`
+- `session-export`
+- `session-history`
 
-Proof files are written to:
+The collector listens on loopback:
 
 ```text
-collector-output\lab-event-*.json
-collector-output\cookie-proof-*.json
+http://127.0.0.1:8765/
+http://127.0.0.1:8765/v1/cookie-proofs
+http://127.0.0.1:8765/v1/lab-events
 ```
 
-Proof mode exports token hashes, lengths, and JWT claims. It does not export
-usable token values.
+By default, cookie proof records contain names, metadata, lengths, and SHA-256
+hashes. `display_value` is `null`, and raw cookie jars are not persisted.
 
-Cookie proof export includes cookie metadata, per-cookie hashes, and a
-`display_value` field that mirrors the extracted cookie JSON exactly. Treat
-cookie proof records as sensitive and do not share or commit them.
-
-## Config Commands
+For a controlled replay experiment, both behaviors require explicit flags:
 
 ```bash
+okta-workspace-mcp init \
+  --org-url "https://your-org.okta.com" \
+  --client-id "your-client-id" \
+  --security-lab \
+  --proof \
+  --persist-cookie-jars \
+  --include-cookie-values
+```
+
+That configuration creates and transmits replayable credential material. Never
+use it with production identities or include its values in screenshots,
+recordings, issues, or commits.
+
+For a local end-to-end lab test:
+
+```bash
+npm run e2e:session-check -- 300
+```
+
+Complete the Okta sign-in in the isolated browser opened by the test.
+
+### Important distinction
+
+Normal OIDC startup authentication and `session-check` are separate flows. The
+OIDC flow uses the system browser and receives OAuth tokens. The lab tool opens a
+fresh CDP-controlled browser and observes the cookies created in that browser.
+
+## Commands
+
+```text
 okta-workspace-mcp init
 okta-workspace-mcp serve
+okta-workspace-mcp collector
 okta-workspace-mcp config
 okta-workspace-mcp config-path
 okta-workspace-mcp reset
 ```
 
-Optional proof-focused init flags:
+Developer commands:
 
-```bash
-okta-workspace-mcp init --proof
-okta-workspace-mcp init --proof --cookie-proof-url "http://127.0.0.1:8765/v1/cookie-proofs"
-okta-workspace-mcp init --proof --persist-cookie-jars
+```text
+npm run build
+npm run serve
+npm run launch
+npm run collector
+npm run e2e:session-check -- 300
 ```
 
-## Detection Notes
+## Cleanup
 
-In Okta System Log, compare the simulation time against:
+1. Stop the MCP and local collector.
+2. Run `okta-workspace-mcp reset` to remove configuration and cached OAuth
+   tokens.
+3. Delete any lab cookie jars under `~/.okta-workspace-mcp/cookies`.
+4. Delete local collector records under `collector-output`.
+5. Revoke the test user's Okta sessions and refresh tokens.
 
-- `app.oauth2.authorize.code`
-- `user.authentication.sso`
-- `app.oauth2.as.token.grant.access_token`
-- `app.oauth2.as.token.grant.refresh_token`
-- `app.oauth2.as.token.grant.id_token`
-- `user.consent.grant`, if consent is enabled
+The `reset` command deliberately does not delete lab evidence automatically.
 
-Useful detection pivots:
+## Detection research
 
-- first-seen or unsanctioned OAuth `client_id`
-- localhost redirect URI
-- `offline_access`
-- `okta.*` scopes
-- MCP/client user agent patterns
-- token grants from a client not in the approved app inventory
+Useful Okta System Log pivots include:
 
-For the session-cookie capture path specifically, also watch for:
+- first-seen or unsanctioned OAuth client IDs
+- localhost redirect URIs
+- `offline_access` and unusual `okta.*` scopes
+- token grants from unapproved AI tooling
+- session use from a new IP, ASN, device, or browser shortly after sign-in
+- administrative activity following session replay
 
-- session cookie use from a new device/user-agent shortly after a
-  `user.authentication.sso` event on a different device
-- `user.session.access_admin_app` or admin-console access immediately
-  following a session cookie replay
-- IP/geovelocity anomalies between the original sign-in and subsequent
-  session use
+See [RESEARCH_DEMONSTRATION.md](RESEARCH_DEMONSTRATION.md) for the lab threat
+model and publication guidance.
+
+## Status and limitations
+
+- Community research project; not an official Okta integration
+- Source installation only; no npm release is currently published
+- Session-lab browser discovery currently targets standard Windows Edge and
+  Chrome installation paths
+- Organization APIs depend on tenant configuration, granted scopes, and roles
+- Pagination is intentionally limited in the current PoC
+
+## License
+
+MIT. See [LICENSE](LICENSE).

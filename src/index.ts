@@ -19,6 +19,14 @@ const AUTH_SERVER = process.env.OKTA_AUTH_SERVER || "default";
 const AUTH_ON_START = ["1", "true", "yes"].includes(
   (process.env.OKTA_MCP_AUTH_ON_START || "").toLowerCase()
 );
+const SECURITY_LAB_ENABLED = ["1", "true", "yes"].includes(
+  (process.env.OKTA_MCP_SECURITY_LAB || "").toLowerCase()
+);
+const REQUESTED_SCOPES = new Set(
+  (process.env.OKTA_SCOPES || "openid profile email offline_access")
+    .split(/\s+/)
+    .filter(Boolean)
+);
 
 if (!ORG_URL || !CLIENT_ID) {
   process.stderr.write(
@@ -110,9 +118,10 @@ server.tool(
   }
 );
 
+if (REQUESTED_SCOPES.has("okta.users.read")) {
 server.tool(
   "my-apps",
-  "List Okta applications (app links) assigned to your account",
+  "List Okta application links assigned to your account (requires okta.users.read and suitable Okta authorization)",
   {},
   async () => {
     await ensureAuth();
@@ -129,7 +138,13 @@ server.tool(
   "list-users",
   "List users in your Okta org (requires okta.users.read scope)",
   {
-    limit: z.number().optional().describe("Max users to return (default 25)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Max users to return, from 1 to 200 (default 25)"),
   },
   async ({ limit }) => {
     await ensureAuth();
@@ -143,7 +158,13 @@ server.tool(
 server.tool(
   "get-user",
   "Get details for a specific Okta user (requires okta.users.read scope)",
-  { userId: z.string().describe("User ID or login email") },
+  {
+    userId: z
+      .string()
+      .min(1)
+      .max(200)
+      .describe("User ID or login email"),
+  },
   async ({ userId }) => {
     await ensureAuth();
     const user = await okta.getUser(userId);
@@ -156,7 +177,13 @@ server.tool(
 server.tool(
   "search-users",
   'Search Okta users with a query expression (requires okta.users.read scope)',
-  { query: z.string().describe("Okta search expression") },
+  {
+    query: z
+      .string()
+      .min(1)
+      .max(500)
+      .describe("Okta search expression"),
+  },
   async ({ query }) => {
     await ensureAuth();
     const users = await okta.searchUsers(query);
@@ -165,12 +192,20 @@ server.tool(
     };
   }
 );
+}
 
+if (REQUESTED_SCOPES.has("okta.groups.read")) {
 server.tool(
   "list-groups",
   "List groups in your Okta org (requires okta.groups.read scope)",
   {
-    limit: z.number().optional().describe("Max groups to return (default 25)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Max groups to return, from 1 to 200 (default 25)"),
   },
   async ({ limit }) => {
     await ensureAuth();
@@ -180,12 +215,20 @@ server.tool(
     };
   }
 );
+}
 
+if (REQUESTED_SCOPES.has("okta.apps.read")) {
 server.tool(
   "list-apps",
   "List applications in your Okta org (requires okta.apps.read scope)",
   {
-    limit: z.number().optional().describe("Max apps to return (default 25)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Max apps to return, from 1 to 200 (default 25)"),
   },
   async ({ limit }) => {
     await ensureAuth();
@@ -195,17 +238,23 @@ server.tool(
     };
   }
 );
+}
 
-// ── Session cookie capture tools (research/PoC — see README) ─
+// Session-cookie research tools are not part of a normal installation. They
+// are registered only after explicit security-lab opt-in during initialization.
+if (SECURITY_LAB_ENABLED) {
 
 server.tool(
   "session-check",
-  "Launches a browser via CDP, waits for you to sign in to Okta, then CAPTURES the resulting SSO session cookie jar (sid/idx/JSESSIONID/DT), validates it against /api/v1/users/me, and stores the raw cookies locally. This is a session-cookie harvesting tool for authorized security research (Cookie-Bite style session hijack demonstration), not a passive health check.",
+  "Authorized security-lab tool: launch an isolated browser, wait for Okta sign-in, capture the resulting session-cookie jar, validate it against /api/v1/users/me, and create local evidence. Captured cookies are replayable credentials.",
   {
-    timeoutSeconds: z
-      .number()
-      .optional()
-      .describe("How long to wait for sign-in to complete (default 300)"),
+      timeoutSeconds: z
+        .number()
+        .int()
+        .min(30)
+        .max(600)
+        .optional()
+        .describe("Sign-in timeout in seconds, from 30 to 600 (default 300)"),
   },
   async ({ timeoutSeconds }) => {
     const result = await harvestCookies({
@@ -220,7 +269,7 @@ server.tool(
 
 server.tool(
   "session-validate",
-  "Re-validate the most recently captured Okta session cookie jar against /api/v1/users/me to confirm the stolen/captured session is still active. Requires session-check to have been run first.",
+  "Authorized security-lab tool: validate the latest locally persisted session-cookie jar against /api/v1/users/me. Requires --persist-cookie-jars during initialization.",
   {},
   async () => {
     const result = await probeLatestJar(ORG_URL);
@@ -232,7 +281,7 @@ server.tool(
 
 server.tool(
   "session-export",
-  "Export the most recently captured Okta session cookie jar in the requested format (raw JSON, Netscape cookie file, or a Cookie header string) for reuse elsewhere, e.g. loading into a browser or HTTP client to replay the session. Requires session-check to have been run first.",
+  "Authorized security-lab tool: export the latest locally persisted session-cookie jar for controlled replay research. Requires --persist-cookie-jars during initialization.",
   {
     format: z
       .enum(["json", "netscape", "header"])
@@ -248,7 +297,7 @@ server.tool(
 
 server.tool(
   "session-history",
-  "List locally captured Okta session cookie jars from prior session-check runs.",
+  "Authorized security-lab tool: list locally persisted session-cookie jars from earlier session-check runs.",
   {},
   async () => {
     const jars = listJars();
@@ -257,6 +306,7 @@ server.tool(
     };
   }
 );
+}
 
 // ── Start ───────────────────────────────────────────────────
 

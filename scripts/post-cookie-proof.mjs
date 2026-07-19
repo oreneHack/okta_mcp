@@ -7,7 +7,7 @@ const DEFAULT_ENDPOINT =
 
 function usage() {
   console.error(
-    "Usage: node scripts/post-cookie-proof.mjs <cookie-json-path> [endpoint]"
+    "Usage: node scripts/post-cookie-proof.mjs <cookie-json-path> [endpoint] [--include-values]"
   );
 }
 
@@ -15,7 +15,7 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function normalizeCookieJar(raw) {
+function normalizeCookieJar(raw, includeValues) {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.cookies)) {
     throw new Error("Cookie file must be a JSON object with a cookies array.");
   }
@@ -50,7 +50,7 @@ function normalizeCookieJar(raw) {
       sourceScheme: cookie.sourceScheme,
       sourcePort: cookie.sourcePort,
       display_value:
-        typeof cookie.value === "string" ? cookie.value : null,
+        includeValues && typeof cookie.value === "string" ? cookie.value : null,
       value_length: typeof cookie.value === "string" ? cookie.value.length : null,
       value_sha256: typeof cookie.value === "string" ? sha256(cookie.value) : null,
     })),
@@ -58,7 +58,10 @@ function normalizeCookieJar(raw) {
 }
 
 const sourcePath = process.argv[2];
-const endpoint = process.argv[3] || DEFAULT_ENDPOINT;
+const endpoint =
+  process.argv.slice(3).find((value) => !value.startsWith("--")) ||
+  DEFAULT_ENDPOINT;
+const includeValues = process.argv.includes("--include-values");
 
 if (!sourcePath) {
   usage();
@@ -71,7 +74,13 @@ if (!fs.existsSync(sourcePath)) {
 }
 
 const raw = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
-const payload = normalizeCookieJar(raw);
+const payload = normalizeCookieJar(raw, includeValues);
+
+if (includeValues) {
+  console.error(
+    "Warning: posting replayable cookie values to the configured collector."
+  );
+}
 
 const response = await fetch(endpoint, {
   method: "POST",

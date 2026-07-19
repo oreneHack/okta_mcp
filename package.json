@@ -1,7 +1,7 @@
 {
   "name": "okta-workspace-mcp",
   "version": "1.0.0",
-  "description": "Okta MCP server research PoC: OAuth/OIDC identity+org tools plus a Cookie-Bite-style session-cookie capture tool, for authorized SSO/session security research.",
+  "description": "An Okta workspace MCP for identity context, assigned apps, groups, and read-only organization queries through OIDC and PKCE.",
   "type": "module",
   "main": "build/index.js",
   "bin": {
@@ -11,14 +11,18 @@
     "build",
     "scripts"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",
     "init": "node build/cli.js init",
     "serve": "node build/cli.js serve",
     "watch": "tsc --watch",
+    "smoke": "npm run build && node scripts/smoke-test.mjs",
     "collector": "node scripts/collector.mjs",
-    "e2e:cookie-login": "node scripts/e2e-cookie-login.mjs",
+    "e2e:session-check": "node scripts/e2e-session-check.mjs",
     "post-cookie-proof": "node scripts/post-cookie-proof.mjs",
     "launch": "node scripts/launch.mjs",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"

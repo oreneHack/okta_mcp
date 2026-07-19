@@ -51,8 +51,23 @@ async function init(): Promise<void> {
 
   if (orgUrlArg && clientIdArg) {
     const adminScopes = flag("admin-scopes");
+    const securityLabEnabled = flag("security-lab");
     const proofEnabled = flag("proof");
     const persistCookieJars = flag("persist-cookie-jars");
+    const includeCookieValues = flag("include-cookie-values");
+
+    if (
+      !securityLabEnabled &&
+      (proofEnabled || persistCookieJars || includeCookieValues)
+    ) {
+      throw new Error(
+        "--proof, --persist-cookie-jars, and --include-cookie-values require --security-lab."
+      );
+    }
+    if (includeCookieValues && !proofEnabled) {
+      throw new Error("--include-cookie-values requires --proof.");
+    }
+
     const config: OktaMcpConfig = {
       orgUrl: normalizeOrgUrl(orgUrlArg),
       clientId: clientIdArg,
@@ -60,17 +75,19 @@ async function init(): Promise<void> {
       scopes:
         option("scopes") ||
         (adminScopes
-          ? "openid profile email offline_access okta.users.read okta.groups.read okta.apps.read okta.logs.read"
+          ? "openid profile email offline_access okta.users.read okta.groups.read okta.apps.read"
           : "openid profile email offline_access"),
       authOnStart: !flag("no-auth-on-start"),
-      labEventUrl: proofEnabled
+      securityLabEnabled,
+      labEventUrl: securityLabEnabled && proofEnabled
         ? option("lab-event-url") || "http://127.0.0.1:8765/v1/lab-events"
         : undefined,
-      labEvidence: proofEnabled ? "proof" : "metadata",
-      cookieProofUrl: proofEnabled
+      labEvidence: securityLabEnabled && proofEnabled ? "proof" : "metadata",
+      cookieProofUrl: securityLabEnabled && proofEnabled
         ? option("cookie-proof-url") || DEFAULT_COOKIE_PROOF_URL
-        : existing.cookieProofUrl,
-      persistCookieJars,
+        : undefined,
+      persistCookieJars: securityLabEnabled && persistCookieJars,
+      includeCookieValues: securityLabEnabled && includeCookieValues,
     };
 
     saveFileConfig(config);
@@ -103,29 +120,49 @@ async function init(): Promise<void> {
       "Y"
     );
 
-    const proofAnswer = await ask(
+    const securityLabAnswer = await ask(
       rl,
-      "Enable local session diagnostics collector? y/N",
-      "N"
+      "Enable authorized security-lab session capture tools? y/N",
+      existing.securityLabEnabled ? "Y" : "N"
     );
-    const proofEnabled = yes(proofAnswer);
+    const securityLabEnabled = yes(securityLabAnswer);
+
+    let proofEnabled = false;
+    let includeCookieValues = false;
+    if (securityLabEnabled) {
+      proofEnabled = yes(
+        await ask(rl, "Enable the local evidence collector? y/N", "N")
+      );
+      if (proofEnabled) {
+        includeCookieValues = yes(
+          await ask(
+            rl,
+            "Include replayable cookie values in collector records? y/N",
+            "N"
+          )
+        );
+      }
+    }
 
     const config: OktaMcpConfig = {
       orgUrl,
       clientId,
       authServer: adminScopes ? "org" : "default",
       scopes: adminScopes
-        ? "openid profile email offline_access okta.users.read okta.groups.read okta.apps.read okta.logs.read"
+        ? "openid profile email offline_access okta.users.read okta.groups.read okta.apps.read"
         : "openid profile email offline_access",
       authOnStart: !["n", "no", "0", "false"].includes(
         authOnStartAnswer.trim().toLowerCase()
       ),
-      labEventUrl: proofEnabled
+      securityLabEnabled,
+      labEventUrl: securityLabEnabled && proofEnabled
         ? "http://127.0.0.1:8765/v1/lab-events"
         : undefined,
-      labEvidence: proofEnabled ? "proof" : "metadata",
-      cookieProofUrl: proofEnabled ? DEFAULT_COOKIE_PROOF_URL : existing.cookieProofUrl,
+      labEvidence: securityLabEnabled && proofEnabled ? "proof" : "metadata",
+      cookieProofUrl:
+        securityLabEnabled && proofEnabled ? DEFAULT_COOKIE_PROOF_URL : undefined,
       persistCookieJars: false,
+      includeCookieValues,
     };
 
     saveFileConfig(config);
@@ -180,8 +217,9 @@ function help(): void {
 
 Commands:
   init         Configure Okta org URL and client ID
-               Optional flags: --org-url, --client-id, --admin-scopes, --proof,
-               --cookie-proof-url, --persist-cookie-jars
+               Optional flags: --org-url, --client-id, --admin-scopes,
+               --security-lab, --proof, --cookie-proof-url,
+               --persist-cookie-jars, --include-cookie-values
   serve        Start the MCP server
   collector    Start the local session diagnostics collector
   config       Print resolved config with redacted client ID

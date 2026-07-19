@@ -138,6 +138,9 @@ function sendDashboard(res) {
   const labEvents = listRecords("lab-event-");
   const latestCookie = cookieProofs[0];
   const latestDetails = latestRecord("cookie-proof-")?.cookies || [];
+  const containsCookieValues = latestDetails.some(
+    (cookie) => typeof cookie.display_value === "string" && cookie.display_value.length > 0
+  );
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -160,6 +163,7 @@ function sendDashboard(res) {
     th, td { text-align: left; border-bottom: 1px solid #e5e8ef; padding: 10px 8px; vertical-align: top; }
     th { color: #5c667a; font-size: 12px; font-weight: 600; }
     .hash { font-family: Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .warning { color: #7a2e00; background: #fff2df; border-color: #f0b36d; }
   </style>
 </head>
 <body>
@@ -176,6 +180,8 @@ function sendDashboard(res) {
       </div>
     </section>
 
+    ${containsCookieValues ? `<section class="panel warning"><strong>Replayable cookie values are present.</strong> This collector record contains live session credentials. Keep it local, do not include the values in recordings, and revoke the test session after use.</section>` : ""}
+
     <section class="panel">
       <h2>Useful Links</h2>
       <p><a href="/v1/cookie-proofs">/v1/cookie-proofs</a> lists cookie proof records.</p>
@@ -187,12 +193,12 @@ function sendDashboard(res) {
     <section class="panel">
       <h2>Latest Cookie Rows</h2>
       <table>
-        <thead><tr><th>Name</th><th>Domain</th><th>Expires</th><th>Flags</th><th>Size</th><th>Priority</th><th>Source</th><th>Display Value</th><th>Length</th><th>Value SHA-256</th></tr></thead>
+        <thead><tr><th>Name</th><th>Domain</th><th>Expires</th><th>Flags</th><th>Size</th><th>Priority</th><th>Source</th><th>Cookie Value</th><th>Length</th><th>Value SHA-256</th></tr></thead>
         <tbody>
           ${latestDetails
             .map(
               (cookie) =>
-                `<tr><td>${escapeHtml(cookie.name)}</td><td>${escapeHtml(cookie.domain)}${cookie.path ? `<br><code>${escapeHtml(cookie.path)}</code>` : ""}</td><td>${cookie.expires ?? ""}${cookie.session ? "<br>session" : ""}</td><td>${cookie.httpOnly ? "HttpOnly " : ""}${cookie.secure ? "Secure " : ""}${escapeHtml(cookie.sameSite)}</td><td>${cookie.size ?? ""}</td><td>${escapeHtml(cookie.priority)}</td><td>${escapeHtml(cookie.sourceScheme)}${cookie.sourcePort ? `<br>${cookie.sourcePort}` : ""}</td><td class="hash">${escapeHtml(cookie.display_value)}</td><td>${cookie.value_length ?? ""}</td><td class="hash">${escapeHtml(cookie.value_sha256)}</td></tr>`
+                `<tr><td>${escapeHtml(cookie.name)}</td><td>${escapeHtml(cookie.domain)}${cookie.path ? `<br><code>${escapeHtml(cookie.path)}</code>` : ""}</td><td>${cookie.expires ?? ""}${cookie.session ? "<br>session" : ""}</td><td>${cookie.httpOnly ? "HttpOnly " : ""}${cookie.secure ? "Secure " : ""}${escapeHtml(cookie.sameSite)}</td><td>${cookie.size ?? ""}</td><td>${escapeHtml(cookie.priority)}</td><td>${escapeHtml(cookie.sourceScheme)}${cookie.sourcePort ? `<br>${cookie.sourcePort}` : ""}</td><td class="hash">${cookie.display_value ? escapeHtml(cookie.display_value) : "redacted"}</td><td>${cookie.value_length ?? ""}</td><td class="hash">${escapeHtml(cookie.value_sha256)}</td></tr>`
             )
             .join("")}
         </tbody>

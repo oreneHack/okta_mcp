@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "local.okta/okta-workspace-mcp",
-  "description": "Okta MCP server research PoC: OAuth/OIDC identity+org tools plus a Cookie-Bite-style session-cookie capture tool, for authorized SSO/session security research.",
+  "description": "Okta workspace MCP for identity context, assigned apps, groups, and read-only organization queries through OIDC and PKCE. Optional security-lab tools are disabled by default.",
   "repository": {
     "url": "https://github.com/oreneHack/okta_mcp",
     "source": "github"
@@ -45,7 +45,14 @@
           "name": "OKTA_MCP_LAB_EVIDENCE"
         },
         {
-          "description": "Optional cookie proof collector endpoint. Posts sanitized cookie proof JSON only.",
+          "description": "Enable authorized session-security research tools. Disabled by default.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_SECURITY_LAB"
+        },
+        {
+          "description": "Optional local cookie-proof collector endpoint. Cookie values are redacted by default.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
@@ -57,6 +64,13 @@
           "format": "string",
           "isSecret": false,
           "name": "OKTA_MCP_PERSIST_COOKIE_JARS"
+        },
+        {
+          "description": "Lab-only opt-in to include replayable cookie values in collector records.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_INCLUDE_COOKIE_VALUES"
         }
       ]
     }

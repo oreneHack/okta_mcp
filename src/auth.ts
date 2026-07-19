@@ -23,6 +23,18 @@ export interface OktaTokens {
   obtained_at: number;
 }
 
+interface TokenCacheContext {
+  orgUrl: string;
+  clientId: string;
+  authServerId: string;
+  scopes: string;
+}
+
+interface TokenCacheRecord {
+  context: TokenCacheContext;
+  tokens: OktaTokens;
+}
+
 function base64url(buf: Buffer): string {
   return buf.toString("base64url");
 }
@@ -35,19 +47,50 @@ function generatePKCE(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-export function loadCachedTokens(): OktaTokens | null {
+function sameContext(a: TokenCacheContext, b: TokenCacheContext): boolean {
+  return (
+    a.orgUrl === b.orgUrl &&
+    a.clientId === b.clientId &&
+    a.authServerId === b.authServerId &&
+    a.scopes === b.scopes
+  );
+}
+
+function loadCachedTokens(context: TokenCacheContext): OktaTokens | null {
   try {
     if (!fs.existsSync(tokenCachePath)) return null;
-    const data = JSON.parse(fs.readFileSync(tokenCachePath, "utf-8"));
-    return data as OktaTokens;
+    const data = JSON.parse(
+      fs.readFileSync(tokenCachePath, "utf-8")
+    ) as Partial<TokenCacheRecord>;
+    if (!data.context || !data.tokens || !sameContext(data.context, context)) {
+      return null;
+    }
+    return data.tokens;
   } catch {
     return null;
   }
 }
 
-function saveTokens(tokens: OktaTokens): void {
-  fs.mkdirSync(path.dirname(tokenCachePath), { recursive: true });
-  fs.writeFileSync(tokenCachePath, JSON.stringify(tokens, null, 2));
+function saveTokens(tokens: OktaTokens, context: TokenCacheContext): void {
+  fs.mkdirSync(path.dirname(tokenCachePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    tokenCachePath,
+    JSON.stringify({ context, tokens } satisfies TokenCacheRecord, null, 2),
+    { mode: 0o600 }
+  );
+}
+
+function cacheContext(
+  orgUrl: string,
+  clientId: string,
+  authServerId: string
+): TokenCacheContext {
+  return {
+    orgUrl: orgUrl.replace(/\/+$/, ""),
+    clientId,
+    authServerId,
+    scopes: process.env.OKTA_SCOPES || DEFAULT_SCOPES,
+  };
 }
 
 function authServerBase(orgUrl: string, authServerId: string): string {
@@ -86,7 +129,7 @@ export async function refreshAccessToken(
     refresh_token: data.refresh_token || tokens.refresh_token,
     obtained_at: Date.now(),
   };
-  saveTokens(refreshed);
+  saveTokens(refreshed, cacheContext(orgUrl, clientId, authServerId));
   return refreshed;
 }
 
@@ -100,7 +143,8 @@ export async function getValidTokens(
   clientId: string,
   authServerId: string
 ): Promise<OktaTokens> {
-  let tokens = loadCachedTokens();
+  const context = cacheContext(orgUrl, clientId, authServerId);
+  let tokens = loadCachedTokens(context);
 
   if (tokens && !isTokenExpired(tokens)) return tokens;
 
@@ -180,7 +224,7 @@ export function browserAuth(
         const data = await tokenResp.json();
         const tokens: OktaTokens = { ...data, obtained_at: Date.now() };
 
-        saveTokens(tokens);
+        saveTokens(tokens, cacheContext(orgUrl, clientId, authServerId));
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(
