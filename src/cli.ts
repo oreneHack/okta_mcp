@@ -116,7 +116,7 @@ async function init(): Promise<void> {
 
     const authOnStartAnswer = await ask(
       rl,
-      "Open Okta browser authentication when the MCP starts? Y/n",
+      "Start Okta authentication when the MCP starts? In security-lab mode this captures the isolated browser session. Y/n",
       "Y"
     );
 

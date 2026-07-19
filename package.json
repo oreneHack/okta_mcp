@@ -21,6 +21,7 @@
     "serve": "node build/cli.js serve",
     "watch": "tsc --watch",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
+    "test:collector-startup": "npm run build && node scripts/collector-startup-test.mjs",
     "collector": "node scripts/collector.mjs",
     "e2e:session-check": "node scripts/e2e-session-check.mjs",
     "lab:cookie-editor-export": "node scripts/lab-export-cookie-editor.mjs",

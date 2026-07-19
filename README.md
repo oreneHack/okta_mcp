@@ -145,9 +145,28 @@ For development from this repository, the checked-in `.vscode/mcp.json` runs
 
 ### 5. Authenticate and use it
 
-Start or reload the MCP client. When `authOnStart` is enabled, the MCP opens the
-hosted Okta sign-in page. After authentication, Okta redirects to the localhost
-callback and the tools become available.
+Start or reload the MCP client. When `authOnStart` is enabled, normal mode opens
+the hosted Okta OIDC sign-in page. After authentication, Okta redirects to the
+localhost callback and the tools become available.
+
+When the security lab is explicitly enabled, startup instead opens the isolated,
+CDP-controlled browser used by `session-check`. A successful sign-in is validated
+against `/api/v1/users/me`, optionally persisted, and posted to the configured
+loopback cookie-proof collector. This avoids launching the unrelated OIDC flow at
+security-lab startup.
+
+For a loopback cookie-proof URL, MCP startup first health-checks the collector and
+starts it automatically when it is not running. The complete startup sequence is:
+
+```text
+MCP client starts `serve`
+-> MCP verifies or starts the loopback collector
+-> collector health check succeeds
+-> isolated Okta browser opens
+-> user signs in
+-> session is validated and cookies are captured
+-> cookie proof is posted to the collector
+```
 
 Example requests:
 
@@ -215,7 +234,8 @@ okta-workspace-mcp init \
   --proof
 ```
 
-Start the local evidence collector:
+The MCP now starts the local evidence collector automatically before a configured
+security-lab startup capture. To run the collector independently instead:
 
 ```bash
 okta-workspace-mcp collector
@@ -278,9 +298,12 @@ lab browser before using Cookie-Editor's import function.
 
 ### Important distinction
 
-Normal OIDC startup authentication and `session-check` are separate flows. The
-OIDC flow uses the system browser and receives OAuth tokens. The lab tool opens a
-fresh CDP-controlled browser and observes the cookies created in that browser.
+Normal OIDC authentication and security-lab session capture are separate flows.
+The OIDC flow uses the system browser and receives OAuth tokens. When the security
+lab and `authOnStart` are both enabled, MCP startup runs the session-capture flow
+instead: it opens a fresh CDP-controlled browser and observes the cookies created
+in that browser. Calling an OIDC-backed identity tool later can still start the
+OIDC flow if no valid OAuth token is cached.
 
 ## Commands
 
