@@ -1,0 +1,64 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "local.okta/okta-mcp-security-lab",
+  "description": "Authorized Okta MCP security lab for browser SSO, token proof evidence, and detection research.",
+  "repository": {
+    "url": "https://example.invalid/okta-mcp-security-lab",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "okta-mcp-security-lab",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Your Okta organization URL (e.g. https://your-org.okta.com)",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_ORG_URL"
+        },
+        {
+          "description": "OIDC application client ID registered on your Okta tenant",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_CLIENT_ID"
+        },
+        {
+          "description": "Optional local lab collector URL, for example http://127.0.0.1:8765/v1/lab-events",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_LAB_EVENT_URL"
+        },
+        {
+          "description": "Optional evidence mode. Set to proof to export non-usable token fingerprints and JWT claims.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_LAB_EVIDENCE"
+        },
+        {
+          "description": "Optional cookie proof collector endpoint. Posts sanitized cookie proof JSON only.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_COOKIE_PROOF_URL"
+        },
+        {
+          "description": "Optional flag to also keep local cookie jars when cookie proof export is enabled.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_PERSIST_COOKIE_JARS"
+        }
+      ]
+    }
+  ]
+}

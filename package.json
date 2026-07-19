@@ -1,0 +1,50 @@
+{
+  "name": "okta-mcp-security-lab",
+  "version": "1.0.0",
+  "description": "Authorized Okta MCP security lab for browser SSO, token proof evidence, and detection research.",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "okta-mcp-security-lab": "./build/cli.js"
+  },
+  "files": [
+    "build",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "init": "node build/cli.js init",
+    "serve": "node build/cli.js serve",
+    "watch": "tsc --watch",
+    "collector": "node scripts/collector.mjs",
+    "e2e:cookie-login": "node scripts/e2e-cookie-login.mjs",
+    "post-cookie-proof": "node scripts/post-cookie-proof.mjs",
+    "launch": "node scripts/launch.mjs",
+    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "open": "^10.2.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  },
+  "mcpName": "local.okta/okta-mcp-security-lab",
+  "keywords": [
+    "mcp",
+    "okta",
+    "identity",
+    "sso",
+    "iam",
+    "ai",
+    "security-research"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://example.invalid/okta-mcp-security-lab.git"
+  }
+}
