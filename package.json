@@ -23,6 +23,7 @@
     "smoke": "npm run build && node scripts/smoke-test.mjs",
     "collector": "node scripts/collector.mjs",
     "e2e:session-check": "node scripts/e2e-session-check.mjs",
+    "lab:cookie-editor-export": "node scripts/lab-export-cookie-editor.mjs",
     "post-cookie-proof": "node scripts/post-cookie-proof.mjs",
     "launch": "node scripts/launch.mjs",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"

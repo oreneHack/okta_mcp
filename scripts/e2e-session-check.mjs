@@ -20,7 +20,6 @@ const env = {
   OKTA_MCP_SECURITY_LAB: "1",
   OKTA_MCP_COOKIE_PROOF_URL:
     process.env.OKTA_MCP_COOKIE_PROOF_URL || "http://127.0.0.1:8765/v1/cookie-proofs",
-  OKTA_MCP_PERSIST_COOKIE_JARS: process.env.OKTA_MCP_PERSIST_COOKIE_JARS || "0",
 };
 
 const transport = new StdioClientTransport({

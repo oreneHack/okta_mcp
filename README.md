@@ -263,6 +263,19 @@ npm run e2e:session-check -- 300
 
 Complete the Okta sign-in in the isolated browser opened by the test.
 
+To convert the latest loopback proof into Cookie-Editor's native JSON-array
+format for the controlled replay scene:
+
+```bash
+npm run lab:cookie-editor-export -- --org-host "your-org.okta.com"
+```
+
+The adapter accepts loopback collector URLs only, verifies that every cookie
+belongs to the expected test tenant, writes a new timestamped file under
+`collector-output`, and never prints values to the terminal. It requires a proof
+created with `--include-cookie-values`. Open the exact Okta tenant in the clean
+lab browser before using Cookie-Editor's import function.
+
 ### Important distinction
 
 Normal OIDC startup authentication and `session-check` are separate flows. The
