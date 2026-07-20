@@ -1,168 +1,275 @@
-let _orgUrl = "";
-let _accessToken = "";
-let _authServer = "default"; // custom auth server ID
+import {
+  discoverOidcMetadata,
+  invalidateTokenCache,
+  verifyIdToken,
+  type OktaTokens,
+} from "./auth.js";
+import type { OktaMcpConfig } from "./config.js";
+import type { JWTPayload } from "jose";
 
-export function configure(
-  orgUrl: string,
-  accessToken: string,
-  authServer = "default"
-): void {
-  _orgUrl = orgUrl;
-  _accessToken = accessToken;
-  _authServer = authServer;
+const API_TIMEOUT_MS = 15_000;
+
+export class OktaApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+    readonly path: string
+  ) {
+    super(message);
+    this.name = "OktaApiError";
+  }
 }
 
-// JWT decoding for local claim display only.
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Okta returned an unexpected JSON response.");
+  }
+  return value as Record<string, unknown>;
+}
 
-function decodeJwtPayload(jwt: string): Record<string, unknown> {
+function decodeJwtPart(jwt: string, index: number): Record<string, unknown> {
   const parts = jwt.split(".");
-  if (parts.length !== 3) throw new Error("Invalid JWT");
-  const payload = Buffer.from(parts[1], "base64url").toString("utf-8");
-  return JSON.parse(payload);
-}
-
-// --- API helpers ---
-
-function oidcBase(): string {
-  // Mirror auth.ts: "org"/empty selects org AS; otherwise use a custom AS.
-  if (!_authServer || _authServer === "org") return `${_orgUrl}/oauth2/v1`;
-  return `${_orgUrl}/oauth2/${_authServer}/v1`;
-}
-
-async function userinfoFetch(): Promise<unknown> {
-  const resp = await fetch(`${oidcBase()}/userinfo`, {
-    headers: { Authorization: `Bearer ${_accessToken}` },
-  });
-  if (!resp.ok) throw new Error(`Userinfo ${resp.status}: ${await resp.text()}`);
-  return resp.json();
-}
-
-async function oktaApiFetch(path: string): Promise<unknown> {
-  const resp = await fetch(`${_orgUrl}${path}`, {
-    headers: {
-      Authorization: `Bearer ${_accessToken}`,
-      Accept: "application/json",
-    },
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    // Non-admin users: the token carries the okta.* scope but the user's
-    // role gates the data, so the management API answers 403. Surface it as a
-    // clean message instead of throwing, so identity tools still shine.
-    if (resp.status === 403) {
-      return {
-        error: "insufficient_role",
-        detail:
-          "Token has the required scope but this user lacks the admin role " +
-          "for this endpoint. Identity tools (whoami/userinfo) still work.",
-        status: 403,
-        path,
-      };
-    }
-    throw new Error(`Okta API ${resp.status}: ${body}`);
-  }
-  return resp.json();
-}
-
-// Tools that work for any authorized user via token claims and userinfo.
-
-export function whoami(): unknown {
-  const claims = decodeJwtPayload(_accessToken);
-  return {
-    subject: claims.sub,
-    client_id: claims.cid,
-    issuer: claims.iss,
-    scopes: claims.scp,
-    groups: claims.groups || claims.Groups || "not included in token",
-    app_roles: claims.appRoles || claims.roles || "not included in token",
-    issued_at: claims.iat
-      ? new Date((claims.iat as number) * 1000).toISOString()
-      : undefined,
-    expires_at: claims.exp
-      ? new Date((claims.exp as number) * 1000).toISOString()
-      : undefined,
-    all_claims: claims,
-  };
-}
-
-export async function userinfo(): Promise<unknown> {
-  return userinfoFetch();
-}
-
-export function tokenDetails(): unknown {
-  const claims = decodeJwtPayload(_accessToken);
-  return {
-    token_type: "access_token (JWT)",
-    algorithm: JSON.parse(
-      Buffer.from(_accessToken.split(".")[0], "base64url").toString()
-    ),
-    issuer: claims.iss,
-    audience: claims.aud,
-    client_id: claims.cid,
-    user_id: claims.uid,
-    subject: claims.sub,
-    scopes: claims.scp,
-    groups: claims.groups || claims.Groups || null,
-    auth_time: claims.auth_time
-      ? new Date((claims.auth_time as number) * 1000).toISOString()
-      : undefined,
-    issued_at: claims.iat
-      ? new Date((claims.iat as number) * 1000).toISOString()
-      : undefined,
-    expires_at: claims.exp
-      ? new Date((claims.exp as number) * 1000).toISOString()
-      : undefined,
-    custom_claims: Object.fromEntries(
-      Object.entries(claims).filter(
-        ([k]) =>
-          ![
-            "ver", "jti", "iss", "aud", "iat", "exp", "cid", "uid",
-            "scp", "sub", "auth_time",
-          ].includes(k)
-      )
-    ),
-  };
-}
-
-export function myGroups(): unknown {
-  const claims = decodeJwtPayload(_accessToken);
-  const groups = claims.groups || claims.Groups;
-  if (!groups) {
-    return {
-      error:
-        'No "groups" claim in token. Configure the authorization server to include a "groups" claim in access tokens.',
-    };
-  }
-  return { user: claims.sub, groups };
-}
-
-// ── Tools that need Okta API scopes (admin or scoped access) ──
-
-export async function listUsers(limit = 25): Promise<unknown> {
-  return oktaApiFetch(`/api/v1/users?limit=${limit}`);
-}
-
-export async function getUser(userId: string): Promise<unknown> {
-  return oktaApiFetch(`/api/v1/users/${encodeURIComponent(userId)}`);
-}
-
-export async function searchUsers(query: string): Promise<unknown> {
-  return oktaApiFetch(
-    `/api/v1/users?search=${encodeURIComponent(query)}&limit=100`
+  if (parts.length !== 3) throw new Error("Token is not a JWT.");
+  return asRecord(
+    JSON.parse(Buffer.from(parts[index], "base64url").toString("utf8"))
   );
 }
 
-export async function listGroups(limit = 25): Promise<unknown> {
-  return oktaApiFetch(`/api/v1/groups?limit=${limit}`);
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      redirect: "error",
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Okta API request timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-export async function listApps(limit = 25): Promise<unknown> {
-  return oktaApiFetch(`/api/v1/apps?limit=${limit}`);
-}
+export class OktaClient {
+  private constructor(
+    private readonly config: OktaMcpConfig,
+    private readonly tokens: OktaTokens,
+    private readonly userinfoEndpoint: string,
+    private readonly idTokenClaims?: JWTPayload
+  ) {}
 
-export async function myAppLinks(): Promise<unknown> {
-  const claims = decodeJwtPayload(_accessToken);
-  const uid = claims.uid as string;
-  if (!uid) return { error: "No uid in token claims" };
-  return oktaApiFetch(`/api/v1/users/${uid}/appLinks`);
+  static async create(
+    config: OktaMcpConfig,
+    tokens: OktaTokens
+  ): Promise<OktaClient> {
+    const metadata = await discoverOidcMetadata(config);
+    const idTokenClaims = tokens.id_token
+      ? await verifyIdToken(config, tokens.id_token)
+      : undefined;
+    return new OktaClient(
+      config,
+      tokens,
+      metadata.userinfo_endpoint,
+      idTokenClaims
+    );
+  }
+
+  private async parseJson(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("Okta returned a non-JSON response.");
+    }
+  }
+
+  private async apiFetch(path: string): Promise<unknown> {
+    const response = await fetchWithTimeout(`${this.config.orgUrl}${path}`, {
+      headers: {
+        Authorization: `Bearer ${this.tokens.access_token}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (response.ok) return this.parseJson(response);
+
+    if (response.status === 401) {
+      invalidateTokenCache(this.config, this.tokens);
+      throw new OktaApiError(
+        "Okta rejected the cached authorization. Run okta-login again.",
+        401,
+        "authentication_required",
+        path
+      );
+    }
+    if (response.status === 403) {
+      throw new OktaApiError(
+        "The signed-in user or OIDC app lacks the required Okta scope, grant, or admin role.",
+        403,
+        "insufficient_authorization",
+        path
+      );
+    }
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("retry-after");
+      throw new OktaApiError(
+        `Okta rate limit reached${retryAfter ? `; Retry-After is ${retryAfter}` : ""}.`,
+        429,
+        "rate_limited",
+        path
+      );
+    }
+
+    throw new OktaApiError(
+      `Okta API request failed with HTTP ${response.status}.`,
+      response.status,
+      "api_error",
+      path
+    );
+  }
+
+  async userinfo(): Promise<Record<string, unknown>> {
+    const response = await fetchWithTimeout(this.userinfoEndpoint, {
+      headers: {
+        Authorization: `Bearer ${this.tokens.access_token}`,
+        Accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      if (response.status === 401) {
+        invalidateTokenCache(this.config, this.tokens);
+        throw new OktaApiError(
+          "Okta authorization is no longer valid. Run okta-login again.",
+          401,
+          "authentication_required",
+          new URL(this.userinfoEndpoint).pathname
+        );
+      }
+      throw new OktaApiError(
+        `Okta userinfo failed with HTTP ${response.status}.`,
+        response.status,
+        "userinfo_error",
+        new URL(this.userinfoEndpoint).pathname
+      );
+    }
+    const profile = asRecord(await this.parseJson(response));
+    if (
+      this.idTokenClaims?.sub !== undefined &&
+      profile.sub !== this.idTokenClaims.sub
+    ) {
+      invalidateTokenCache(this.config, this.tokens);
+      throw new OktaApiError(
+        "Okta userinfo subject did not match the verified ID token. Reconnect before retrying.",
+        401,
+        "authentication_required",
+        new URL(this.userinfoEndpoint).pathname
+      );
+    }
+    return profile;
+  }
+
+  async whoami(): Promise<unknown> {
+    const profile = await this.userinfo();
+    return {
+      organization: this.config.orgUrl,
+      issuer:
+        this.config.authServer === "org"
+          ? this.config.orgUrl
+          : `${this.config.orgUrl}/oauth2/${this.config.authServer}`,
+      subject: profile.sub,
+      name: profile.name,
+      preferred_username: profile.preferred_username,
+      email: profile.email,
+      email_verified: profile.email_verified,
+      granted_scopes: this.tokens.scope.split(/\s+/).filter(Boolean),
+      profile,
+    };
+  }
+
+  tokenDetails(): unknown {
+    const obtainedAt = new Date(this.tokens.obtained_at);
+    const expiresAt = new Date(
+      this.tokens.obtained_at + this.tokens.expires_in * 1000
+    );
+    const accessTokenParts = this.tokens.access_token.split(".");
+    let jwtHeader: Record<string, unknown> | undefined;
+    if (accessTokenParts.length === 3) {
+      try {
+        jwtHeader = decodeJwtPart(this.tokens.access_token, 0);
+      } catch {
+        // Token format is diagnostic only; do not depend on Okta org-token internals.
+      }
+    }
+
+    return {
+      token_type: this.tokens.token_type,
+      access_token_format: accessTokenParts.length === 3 ? "JWT" : "opaque",
+      jwt_header: jwtHeader,
+      granted_scopes: this.tokens.scope.split(/\s+/).filter(Boolean),
+      obtained_at: obtainedAt.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      expires_in_seconds: Math.max(
+        0,
+        Math.floor((expiresAt.getTime() - Date.now()) / 1000)
+      ),
+      refresh_token_available: Boolean(this.tokens.refresh_token),
+      id_token_available: Boolean(this.tokens.id_token),
+      note: "Bearer token values and unstable access-token claims are intentionally omitted.",
+    };
+  }
+
+  myGroups(): unknown {
+    if (!this.idTokenClaims) {
+      return {
+        groups: [],
+        note:
+          "No current verified ID token is available. Reconnect, or retry after a refresh that returns a new ID token.",
+      };
+    }
+
+    const groups = this.idTokenClaims.groups || this.idTokenClaims.Groups;
+    if (!Array.isArray(groups) || !groups.every((group) => typeof group === "string")) {
+      return {
+        groups: [],
+        note:
+          'No "groups" claim is present in the ID token. Configure an Okta groups claim for this OIDC app if needed.',
+      };
+    }
+    return { subject: this.idTokenClaims.sub, groups };
+  }
+
+  async listUsers(limit = 25): Promise<unknown> {
+    return this.apiFetch(`/api/v1/users?limit=${limit}`);
+  }
+
+  async getUser(userId: string): Promise<unknown> {
+    return this.apiFetch(`/api/v1/users/${encodeURIComponent(userId)}`);
+  }
+
+  async searchUsers(query: string): Promise<unknown> {
+    return this.apiFetch(
+      `/api/v1/users?search=${encodeURIComponent(query)}&limit=100`
+    );
+  }
+
+  async listGroups(limit = 25): Promise<unknown> {
+    return this.apiFetch(`/api/v1/groups?limit=${limit}`);
+  }
+
+  async listApps(limit = 25): Promise<unknown> {
+    return this.apiFetch(`/api/v1/apps?limit=${limit}`);
+  }
+
+  async myAppLinks(): Promise<unknown> {
+    const profile = await this.userinfo();
+    const subject = profile.sub;
+    if (typeof subject !== "string" || !subject) {
+      throw new Error("Okta userinfo did not include a subject identifier.");
+    }
+    return this.apiFetch(`/api/v1/users/${encodeURIComponent(subject)}/appLinks`);
+  }
 }

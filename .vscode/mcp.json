@@ -1,10 +1,11 @@
 {
+  "inputs": [],
   "servers": {
     "okta-workspace": {
+      "type": "stdio",
       "command": "node",
       "args": [
-        "${workspaceFolder}/build/cli.js",
-        "serve"
+        "${workspaceFolder}/scripts/okta-mcp.mjs"
       ]
     }
   }

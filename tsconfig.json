@@ -11,6 +11,12 @@
     "forceConsistentCasingInFileNames": true,
     "declaration": true
   },
-  "include": ["src/**/*"],
+  "include": [
+    "src/auth.ts",
+    "src/cli.ts",
+    "src/config.ts",
+    "src/index.ts",
+    "src/okta-client.ts"
+  ],
   "exclude": ["node_modules", "build"]
 }

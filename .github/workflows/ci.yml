@@ -9,9 +9,10 @@ permissions:
 
 jobs:
   build-and-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node-version: [20, 22]
 
     steps:
@@ -22,4 +23,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run smoke
+      - run: node scripts/collector-startup-test.mjs
+      - run: node scripts/lab-mcp-smoke.mjs
       - run: npm audit --audit-level=high

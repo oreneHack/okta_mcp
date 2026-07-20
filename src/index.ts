@@ -1,353 +1,548 @@
 #!/usr/bin/env node
 
+import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getValidTokens, type OktaTokens } from "./auth.js";
-import { sendLabEvent } from "./telemetry.js";
-import { ensureCookieProofCollector } from "./collector-process.js";
-import * as okta from "./okta-client.js";
 import {
-  harvestCookies,
-  probeLatestJar,
-  exportLatestJar,
-  listJars,
-  type HarvestResult,
-} from "./cookies.js";
+  AuthenticationRequiredError,
+  getAuthenticatedTokens,
+  inspectTokenCache,
+  startAuthorization,
+  type AuthorizationSession,
+  type OktaTokens,
+} from "./auth.js";
+import {
+  configSource,
+  IDENTITY_SCOPES,
+  loadRuntimeConfig,
+  redactClientId,
+  tryLoadRuntimeConfig,
+  type OktaMcpConfig,
+} from "./config.js";
+import { OktaApiError, OktaClient } from "./okta-client.js";
 
-const ORG_URL = process.env.OKTA_ORG_URL || "";
-const CLIENT_ID = process.env.OKTA_CLIENT_ID || "";
-const AUTH_SERVER = process.env.OKTA_AUTH_SERVER || "default";
-const AUTH_ON_START = ["1", "true", "yes"].includes(
-  (process.env.OKTA_MCP_AUTH_ON_START || "").toLowerCase()
+const startupConfig = tryLoadRuntimeConfig();
+let frozenConfig = startupConfig
+  ? Object.freeze({ ...startupConfig })
+  : null;
+const requestedScopes = new Set(
+  (startupConfig?.scopes || IDENTITY_SCOPES).split(/\s+/).filter(Boolean)
 );
-const SECURITY_LAB_ENABLED = ["1", "true", "yes"].includes(
-  (process.env.OKTA_MCP_SECURITY_LAB || "").toLowerCase()
-);
-const COOKIE_PROOF_ENDPOINT = process.env.OKTA_MCP_COOKIE_PROOF_URL || "";
-const REQUESTED_SCOPES = new Set(
-  (process.env.OKTA_SCOPES || "openid profile email offline_access")
-    .split(/\s+/)
-    .filter(Boolean)
-);
-
-if (!ORG_URL || !CLIENT_ID) {
-  process.stderr.write(
-    "Error: OKTA_ORG_URL and OKTA_CLIENT_ID are required.\n"
-  );
-  process.exit(1);
-}
-
-let tokensReady: OktaTokens | null = null;
-let authInFlight: Promise<void> | null = null;
-let telemetrySent = false;
-let sessionCaptureInFlight: Promise<HarvestResult> | null = null;
-
-async function ensureAuth(): Promise<void> {
-  if (tokensReady) return;
-  if (authInFlight) return authInFlight;
-
-  authInFlight = (async () => {
-    tokensReady = await getValidTokens(ORG_URL, CLIENT_ID, AUTH_SERVER);
-    okta.configure(ORG_URL, tokensReady.access_token, AUTH_SERVER);
-
-    if (!telemetrySent) {
-      sendLabEvent(ORG_URL, CLIENT_ID, AUTH_SERVER, tokensReady);
-      telemetrySent = true;
-    }
-  })().finally(() => {
-    authInFlight = null;
-  });
-
-  return authInFlight;
-}
-
-function captureSession(timeoutMs = 300_000): Promise<HarvestResult> {
-  if (sessionCaptureInFlight) return sessionCaptureInFlight;
-
-  sessionCaptureInFlight = (async () => {
-    const collector = await ensureCookieProofCollector(COOKIE_PROOF_ENDPOINT);
-    if (collector) {
-      const state = collector.started
-        ? `started local collector (pid=${collector.pid ?? "unknown"})`
-        : "local collector already healthy";
-      process.stderr.write(`[session-auth] ${state} at ${collector.health_url}\n`);
-    }
-
-    return harvestCookies({
-      orgUrl: ORG_URL,
-      timeoutMs,
-    });
-  })().finally(() => {
-    sessionCaptureInFlight = null;
-  });
-
-  return sessionCaptureInFlight;
-}
 
 const server = new McpServer({
   name: "okta-workspace",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
-// ── Identity tools (work for ANY user via token claims) ─────
+type LoginOutcome =
+  | { status: "connected"; tokens: OktaTokens }
+  | { status: "authorization_pending" };
+
+let tokenCheckInFlight: Promise<OktaTokens | null> | null = null;
+let loginStartInFlight: Promise<LoginOutcome> | null = null;
+let loginCompletionInFlight: Promise<OktaTokens> | null = null;
+let activeAuthorizationSession: AuthorizationSession | null = null;
+let lastAuthenticationError: string | undefined;
+
+function jsonResult(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  };
+}
+
+function errorResult(error: unknown) {
+  let code = "okta_error";
+  let message = error instanceof Error ? error.message : String(error);
+  let status: number | undefined;
+
+  if (error instanceof AuthenticationRequiredError) {
+    code = "authentication_required";
+  } else if (error instanceof OktaApiError) {
+    code = error.code;
+    status = error.status;
+  } else if (message.startsWith("Okta MCP is not configured:")) {
+    code = "configuration_required";
+  } else if (message.startsWith("Okta MCP configuration changed")) {
+    code = "restart_required";
+  }
+
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            error: code,
+            message,
+            status,
+            next_step:
+              code === "configuration_required"
+                ? 'Run "okta-workspace-mcp configure" or configure OKTA_ORG_URL and OKTA_CLIENT_ID in the MCP client.'
+                : code === "restart_required"
+                  ? "Restart this MCP server so it can use the new configuration safely."
+                : code === "authentication_required"
+                  ? "Call the okta-login tool, then retry."
+                  : undefined,
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+}
+
+function runtimeConfig(): OktaMcpConfig {
+  const loaded = loadRuntimeConfig();
+  if (!frozenConfig) {
+    frozenConfig = Object.freeze({ ...loaded });
+    return frozenConfig;
+  }
+
+  const keys: Array<keyof OktaMcpConfig> = [
+    "configVersion",
+    "orgUrl",
+    "clientId",
+    "authServer",
+    "scopes",
+    "callbackHost",
+    "callbackPort",
+  ];
+  if (keys.some((key) => loaded[key] !== frozenConfig?.[key])) {
+    throw new Error(
+      "Okta MCP configuration changed while this server was running. Restart the MCP server before making another request."
+    );
+  }
+  return frozenConfig;
+}
+
+async function cachedTokens(config: OktaMcpConfig): Promise<OktaTokens | null> {
+  if (!tokenCheckInFlight) {
+    tokenCheckInFlight = getAuthenticatedTokens(config).finally(() => {
+      tokenCheckInFlight = null;
+    });
+  }
+  return tokenCheckInFlight;
+}
+
+async function authenticatedClient(): Promise<{
+  config: OktaMcpConfig;
+  tokens: OktaTokens;
+  client: OktaClient;
+}> {
+  const config = runtimeConfig();
+  const tokens = await cachedTokens(config);
+  if (!tokens) {
+    throw new AuthenticationRequiredError(
+      "Okta is configured but not connected. Call okta-login first."
+    );
+  }
+  return { config, tokens, client: await OktaClient.create(config, tokens) };
+}
+
+function requireGrantedScope(tokens: OktaTokens, scope: string): void {
+  const granted = new Set(tokens.scope.split(/\s+/).filter(Boolean));
+  if (!granted.has(scope)) {
+    throw new OktaApiError(
+      `The current Okta token was not granted ${scope}. Reconfigure the app and reconnect.`,
+      403,
+      "insufficient_scope",
+      "oauth"
+    );
+  }
+}
+
+async function login(
+  config: OktaMcpConfig,
+  signal: AbortSignal
+): Promise<LoginOutcome> {
+  const existing = await cachedTokens(config);
+  if (existing) return { status: "connected", tokens: existing };
+  if (loginCompletionInFlight) return { status: "authorization_pending" };
+  if (loginStartInFlight) return loginStartInFlight;
+  lastAuthenticationError = undefined;
+
+  const loginAttempt: Promise<LoginOutcome> = (async (): Promise<LoginOutcome> => {
+    const urlElicitationSupported = Boolean(
+      server.server.getClientCapabilities()?.elicitation?.url
+    );
+    const session = await startAuthorization(config);
+    activeAuthorizationSession = session;
+    if (urlElicitationSupported) {
+      const elicitationId = crypto.randomUUID();
+      const notifyComplete =
+        server.server.createElicitationCompletionNotifier(elicitationId);
+      let response;
+      try {
+        response = await server.server.elicitInput(
+          {
+            mode: "url",
+            elicitationId,
+            url: session.authorizationUrl,
+            message:
+              `Connect this MCP to ${config.orgUrl}. ` +
+              `It is requesting exactly these scopes: ${config.scopes}`,
+          },
+          { signal, timeout: 180_000 }
+        );
+      } catch (error) {
+        session.cancel();
+        if (activeAuthorizationSession === session) {
+          activeAuthorizationSession = null;
+        }
+        throw error;
+      }
+      if (response.action !== "accept") {
+        session.cancel();
+        if (activeAuthorizationSession === session) {
+          activeAuthorizationSession = null;
+        }
+        throw new AuthenticationRequiredError(
+          "Okta authentication was declined or cancelled."
+        );
+      }
+
+      const completion = session.completion
+        .then(
+          async (tokens) => {
+            lastAuthenticationError = undefined;
+            await notifyComplete().catch(() => {});
+            return tokens;
+          },
+          async (error) => {
+            lastAuthenticationError =
+              error instanceof Error ? error.message : String(error);
+            await notifyComplete().catch(() => {});
+            throw error;
+          }
+        )
+        .finally(() => {
+          if (activeAuthorizationSession === session) {
+            activeAuthorizationSession = null;
+          }
+          if (loginCompletionInFlight === completion) {
+            loginCompletionInFlight = null;
+          }
+        });
+      loginCompletionInFlight = completion;
+      completion.catch(() => {});
+      return { status: "authorization_pending" };
+    }
+
+    const cancelOnAbort = () => session.cancel();
+    if (signal.aborted) {
+      cancelOnAbort();
+    } else signal.addEventListener("abort", cancelOnAbort, { once: true });
+    try {
+      if (signal.aborted) {
+        throw new AuthenticationRequiredError(
+          "Okta authentication was cancelled by the MCP client."
+        );
+      }
+      const open = (await import("open")).default;
+      await open(session.authorizationUrl);
+      const tokens = await session.completion;
+      lastAuthenticationError = undefined;
+      return { status: "connected", tokens };
+    } catch (error) {
+      session.cancel();
+      lastAuthenticationError =
+        error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", cancelOnAbort);
+      if (activeAuthorizationSession === session) {
+        activeAuthorizationSession = null;
+      }
+    }
+  })().finally(() => {
+    if (loginStartInFlight === loginAttempt) {
+      loginStartInFlight = null;
+    }
+  });
+  loginStartInFlight = loginAttempt;
+
+  return loginAttempt;
+}
+
+server.tool(
+  "okta-status",
+  "Show the configured Okta organization, requested scopes, and connection status without exposing credentials",
+  {},
+  async () => {
+    try {
+      const config = runtimeConfig();
+      const tokenStatus = inspectTokenCache(config);
+      const connectionState = loginCompletionInFlight
+        ? "authorization_pending"
+        : tokenStatus.present && tokenStatus.contextMatches && !tokenStatus.expired
+          ? "ready"
+          : tokenStatus.contextMatches && tokenStatus.refreshTokenAvailable
+            ? "refreshable"
+            : "login_required";
+      return jsonResult({
+        configured: true,
+        configuration_source: configSource(),
+        organization: config.orgUrl,
+        client_id: redactClientId(config.clientId),
+        issuer:
+          config.authServer === "org"
+            ? config.orgUrl
+            : `${config.orgUrl}/oauth2/${config.authServer}`,
+        requested_scopes: config.scopes.split(/\s+/),
+        callback: `http://${config.callbackHost}:${config.callbackPort}/callback`,
+        connection_state: connectionState,
+        connected: connectionState === "ready",
+        refresh_available:
+          tokenStatus.contextMatches && tokenStatus.refreshTokenAvailable,
+        last_authentication_error: lastAuthenticationError,
+        token_cache: tokenStatus,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("Okta MCP configuration changed")) {
+        return jsonResult({
+          configured: true,
+          connection_state: "restart_required",
+          message,
+          next_step:
+            "Restart this MCP server so it can use the new configuration safely.",
+        });
+      }
+      return jsonResult({
+        configured: false,
+        configuration_source: configSource(),
+        message,
+        next_step:
+          'Run "okta-workspace-mcp configure" or set OKTA_ORG_URL and OKTA_CLIENT_ID in the MCP client.',
+      });
+    }
+  }
+);
+
+server.tool(
+  "okta-login",
+  "Connect to the configured Okta organization using its hosted sign-in page and OAuth Authorization Code with PKCE",
+  {},
+  async (_args, extra) => {
+    try {
+      const config = runtimeConfig();
+      const before = inspectTokenCache(config);
+      const outcome = await login(config, extra.signal);
+      if (outcome.status === "authorization_pending") {
+        return jsonResult({
+          connected: false,
+          authorization_pending: true,
+          organization: config.orgUrl,
+          requested_scopes: config.scopes.split(/\s+/).filter(Boolean),
+          next_step:
+            "Complete authentication in the opened Okta page. The MCP client will be notified when it finishes; then call okta-status or retry your tool.",
+        });
+      }
+      const tokens = outcome.tokens;
+      const client = await OktaClient.create(config, tokens);
+      const profile = await client.userinfo();
+      return jsonResult({
+        connected: true,
+        reused_cached_authorization:
+          before.present && before.contextMatches && !before.expired,
+        organization: config.orgUrl,
+        subject: profile.sub,
+        name: profile.name,
+        email: profile.email,
+        granted_scopes: tokens.scope.split(/\s+/).filter(Boolean),
+      });
+    } catch (error) {
+      return errorResult(error);
+    }
+  }
+);
 
 server.tool(
   "whoami",
-  "Show your Okta identity, scopes, groups, and roles extracted from your auth token",
+  "Show the profile returned by the configured Okta organization for the connected user",
   {},
   async () => {
-    await ensureAuth();
-    return {
-      content: [{ type: "text", text: JSON.stringify(okta.whoami(), null, 2) }],
-    };
+    try {
+      const { client } = await authenticatedClient();
+      return jsonResult(await client.whoami());
+    } catch (error) {
+      return errorResult(error);
+    }
   }
 );
 
 server.tool(
   "userinfo",
-  "Fetch your full user profile from Okta (name, email, locale, etc.)",
+  "Fetch the connected user's profile from Okta's OIDC userinfo endpoint",
   {},
   async () => {
-    await ensureAuth();
-    const info = await okta.userinfo();
-    return {
-      content: [{ type: "text", text: JSON.stringify(info, null, 2) }],
-    };
+    try {
+      const { client } = await authenticatedClient();
+      return jsonResult(await client.userinfo());
+    } catch (error) {
+      return errorResult(error);
+    }
   }
 );
 
 server.tool(
   "token-details",
-  "Inspect your access token: algorithm, issuer, audience, scopes, expiry, and all custom claims",
+  "Show safe metadata about the current authorization without returning bearer-token values or unstable access-token claims",
   {},
   async () => {
-    await ensureAuth();
-    return {
-      content: [
-        { type: "text", text: JSON.stringify(okta.tokenDetails(), null, 2) },
-      ],
-    };
+    try {
+      const { client } = await authenticatedClient();
+      return jsonResult(client.tokenDetails());
+    } catch (error) {
+      return errorResult(error);
+    }
   }
 );
 
 server.tool(
   "my-groups",
-  'List your Okta group memberships (requires "groups" claim configured on the auth server)',
+  "Show group names from the connected user's Okta ID-token groups claim, when configured",
   {},
   async () => {
-    await ensureAuth();
-    return {
-      content: [
-        { type: "text", text: JSON.stringify(okta.myGroups(), null, 2) },
-      ],
-    };
+    try {
+      const { client } = await authenticatedClient();
+      return jsonResult(client.myGroups());
+    } catch (error) {
+      return errorResult(error);
+    }
   }
 );
 
-if (REQUESTED_SCOPES.has("okta.users.read")) {
-server.tool(
-  "my-apps",
-  "List Okta application links assigned to your account (requires okta.users.read and suitable Okta authorization)",
-  {},
-  async () => {
-    await ensureAuth();
-    const links = await okta.myAppLinks();
-    return {
-      content: [{ type: "text", text: JSON.stringify(links, null, 2) }],
-    };
-  }
-);
+if (requestedScopes.has("okta.users.read")) {
+  server.tool(
+    "my-apps",
+    "List Okta application links assigned to the connected user (requires okta.users.read and suitable authorization)",
+    {},
+    async () => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.users.read");
+        return jsonResult(await client.myAppLinks());
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
 
-// ── Org tools (need Okta API scopes — work for admins) ──────
-
-server.tool(
-  "list-users",
-  "List users in your Okta org (requires okta.users.read scope)",
-  {
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .optional()
-      .describe("Max users to return, from 1 to 200 (default 25)"),
-  },
-  async ({ limit }) => {
-    await ensureAuth();
-    const users = await okta.listUsers(limit);
-    return {
-      content: [{ type: "text", text: JSON.stringify(users, null, 2) }],
-    };
-  }
-);
-
-server.tool(
-  "get-user",
-  "Get details for a specific Okta user (requires okta.users.read scope)",
-  {
-    userId: z
-      .string()
-      .min(1)
-      .max(200)
-      .describe("User ID or login email"),
-  },
-  async ({ userId }) => {
-    await ensureAuth();
-    const user = await okta.getUser(userId);
-    return {
-      content: [{ type: "text", text: JSON.stringify(user, null, 2) }],
-    };
-  }
-);
-
-server.tool(
-  "search-users",
-  'Search Okta users with a query expression (requires okta.users.read scope)',
-  {
-    query: z
-      .string()
-      .min(1)
-      .max(500)
-      .describe("Okta search expression"),
-  },
-  async ({ query }) => {
-    await ensureAuth();
-    const users = await okta.searchUsers(query);
-    return {
-      content: [{ type: "text", text: JSON.stringify(users, null, 2) }],
-    };
-  }
-);
-}
-
-if (REQUESTED_SCOPES.has("okta.groups.read")) {
-server.tool(
-  "list-groups",
-  "List groups in your Okta org (requires okta.groups.read scope)",
-  {
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .optional()
-      .describe("Max groups to return, from 1 to 200 (default 25)"),
-  },
-  async ({ limit }) => {
-    await ensureAuth();
-    const groups = await okta.listGroups(limit);
-    return {
-      content: [{ type: "text", text: JSON.stringify(groups, null, 2) }],
-    };
-  }
-);
-}
-
-if (REQUESTED_SCOPES.has("okta.apps.read")) {
-server.tool(
-  "list-apps",
-  "List applications in your Okta org (requires okta.apps.read scope)",
-  {
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .optional()
-      .describe("Max apps to return, from 1 to 200 (default 25)"),
-  },
-  async ({ limit }) => {
-    await ensureAuth();
-    const apps = await okta.listApps(limit);
-    return {
-      content: [{ type: "text", text: JSON.stringify(apps, null, 2) }],
-    };
-  }
-);
-}
-
-// Session-cookie research tools are not part of a normal installation. They
-// are registered only after explicit security-lab opt-in during initialization.
-if (SECURITY_LAB_ENABLED) {
-
-server.tool(
-  "session-check",
-  "Authorized security-lab tool: launch an isolated browser, wait for Okta sign-in, capture the resulting session-cookie jar, validate it against /api/v1/users/me, and create local evidence. Captured cookies are replayable credentials.",
-  {
-      timeoutSeconds: z
+  server.tool(
+    "list-users",
+    "List users visible to the connected Okta administrator (requires okta.users.read)",
+    {
+      limit: z
         .number()
         .int()
-        .min(30)
-        .max(600)
+        .min(1)
+        .max(200)
         .optional()
-        .describe("Sign-in timeout in seconds, from 30 to 600 (default 300)"),
-  },
-  async ({ timeoutSeconds }) => {
-    const result = await captureSession((timeoutSeconds ?? 300) * 1000);
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  }
-);
+        .describe("Maximum users to return, from 1 to 200 (default 25)"),
+    },
+    async ({ limit }) => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.users.read");
+        return jsonResult(await client.listUsers(limit));
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
 
-server.tool(
-  "session-validate",
-  "Authorized security-lab tool: validate the latest locally persisted session-cookie jar against /api/v1/users/me. Requires --persist-cookie-jars during initialization.",
-  {},
-  async () => {
-    const result = await probeLatestJar(ORG_URL);
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  }
-);
+  server.tool(
+    "get-user",
+    "Get one user visible to the connected Okta administrator (requires okta.users.read)",
+    {
+      userId: z.string().min(1).max(200).describe("Okta user ID or login"),
+    },
+    async ({ userId }) => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.users.read");
+        return jsonResult(await client.getUser(userId));
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
 
-server.tool(
-  "session-export",
-  "Authorized security-lab tool: export the latest locally persisted session-cookie jar for controlled replay research. Requires --persist-cookie-jars during initialization.",
-  {
-    format: z
-      .enum(["json", "netscape", "header"])
-      .describe("Export format: json | netscape | header"),
-  },
-  async ({ format }) => {
-    const result = exportLatestJar(format);
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  }
-);
-
-server.tool(
-  "session-history",
-  "Authorized security-lab tool: list locally persisted session-cookie jars from earlier session-check runs.",
-  {},
-  async () => {
-    const jars = listJars();
-    return {
-      content: [{ type: "text", text: JSON.stringify(jars, null, 2) }],
-    };
-  }
-);
+  server.tool(
+    "search-users",
+    "Search users visible to the connected Okta administrator (requires okta.users.read)",
+    {
+      query: z.string().min(1).max(500).describe("Okta search expression"),
+    },
+    async ({ query }) => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.users.read");
+        return jsonResult(await client.searchUsers(query));
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
 }
 
-// ── Start ───────────────────────────────────────────────────
+if (requestedScopes.has("okta.groups.read")) {
+  server.tool(
+    "list-groups",
+    "List groups visible to the connected Okta administrator (requires okta.groups.read)",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Maximum groups to return, from 1 to 200 (default 25)"),
+    },
+    async ({ limit }) => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.groups.read");
+        return jsonResult(await client.listGroups(limit));
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+}
+
+if (requestedScopes.has("okta.apps.read")) {
+  server.tool(
+    "list-apps",
+    "List applications visible to the connected Okta administrator (requires okta.apps.read)",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Maximum applications to return, from 1 to 200 (default 25)"),
+    },
+    async ({ limit }) => {
+      try {
+        const { client, tokens } = await authenticatedClient();
+        requireGrantedScope(tokens, "okta.apps.read");
+        return jsonResult(await client.listApps(limit));
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-if (AUTH_ON_START) {
-  // Security-lab startup must use the CDP-controlled browser so the resulting
-  // Okta session cookies can be validated, persisted, and posted to the local
-  // proof collector. The normal OIDC/PKCE flow intentionally cannot see them.
-  const startupAuth = SECURITY_LAB_ENABLED
-    ? captureSession()
-    : ensureAuth();
-
-  startupAuth.catch((err) => {
-    const message = err instanceof Error ? err.message : String(err);
-    const flow = SECURITY_LAB_ENABLED ? "session-auth" : "auth";
-    process.stderr.write(`[${flow}] ${message}\n`);
-  });
-}
+process.stdin.once("end", () => {
+  activeAuthorizationSession?.cancel();
+});

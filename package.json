@@ -1,36 +1,46 @@
 {
   "name": "okta-workspace-mcp",
-  "version": "1.0.0",
-  "description": "An Okta workspace MCP for identity context, assigned apps, groups, and read-only organization queries through OIDC and PKCE.",
+  "version": "1.3.0",
+  "description": "A local Okta MCP with guided Browser Session or OIDC/OAuth authentication and redacted security evidence.",
   "type": "module",
-  "main": "build/index.js",
   "bin": {
-    "okta-workspace-mcp": "./build/cli.js"
+    "okta-workspace-mcp": "./scripts/okta-mcp.mjs"
   },
   "files": [
-    "build",
-    "scripts"
+    "build/auth.js",
+    "build/auth.d.ts",
+    "build/cli.js",
+    "build/cli.d.ts",
+    "build/config.js",
+    "build/config.d.ts",
+    "build/okta-client.js",
+    "build/okta-client.d.ts",
+    "scripts/okta-mcp.mjs",
+    "scripts/lab-mcp.mjs",
+    "scripts/browser-session-worker.mjs",
+    "scripts/lab-browser-session-proof.mjs",
+    "scripts/collector.mjs",
+    "scripts/start-okta-mcp.cmd"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "start": "node scripts/okta-mcp.mjs",
+    "build": "node scripts/clean-build.mjs && tsc",
     "prepare": "npm run build",
-    "init": "node build/cli.js init",
-    "serve": "node build/cli.js serve",
+    "configure": "node build/cli.js configure",
+    "login": "node build/cli.js login",
+    "status": "node build/cli.js status",
+    "serve": "node scripts/okta-mcp.mjs",
     "watch": "tsc --watch",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
-    "test:collector-startup": "npm run build && node scripts/collector-startup-test.mjs",
-    "collector": "node scripts/collector.mjs",
-    "e2e:session-check": "node scripts/e2e-session-check.mjs",
-    "lab:cookie-editor-export": "node scripts/lab-export-cookie-editor.mjs",
-    "post-cookie-proof": "node scripts/post-cookie-proof.mjs",
-    "launch": "node scripts/launch.mjs",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
+    "test": "npm run smoke",
+    "launch": "node scripts/okta-mcp.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "jose": "^6.1.3",
     "open": "^10.2.0",
     "zod": "^3.23.8"
   },
@@ -38,7 +48,7 @@
     "@types/node": "^20.11.24",
     "typescript": "^5.3.3"
   },
-  "mcpName": "local.okta/okta-workspace-mcp",
+  "mcpName": "io.github.orenehack/okta-workspace-mcp",
   "keywords": [
     "mcp",
     "okta",
@@ -46,7 +56,7 @@
     "sso",
     "iam",
     "ai",
-    "security-research"
+    "access-management"
   ],
   "license": "MIT",
   "repository": {

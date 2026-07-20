@@ -1,76 +1,83 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "local.okta/okta-workspace-mcp",
-  "description": "Okta workspace MCP for identity context, assigned apps, groups, and read-only organization queries through OIDC and PKCE. Optional security-lab tools are disabled by default.",
+  "name": "io.github.orenehack/okta-workspace-mcp",
+  "description": "Guided Okta MCP with explicit Browser Session or OIDC/OAuth authentication, redacted security evidence, identity context, and optional read-only organization tools.",
   "repository": {
     "url": "https://github.com/oreneHack/okta_mcp",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.3.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "okta-workspace-mcp",
-      "version": "1.0.0",
+      "version": "1.3.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Your Okta organization URL (e.g. https://your-org.okta.com)",
-          "isRequired": true,
+          "description": "Exact HTTPS origin of your Okta organization, for example https://example.okta.com",
+          "isRequired": false,
           "format": "string",
           "isSecret": false,
           "name": "OKTA_ORG_URL"
         },
         {
-          "description": "OIDC application client ID registered on your Okta tenant",
-          "isRequired": true,
+          "description": "Public client ID of the Okta Native OIDC application. Required only for OIDC mode; okta-start requests it through MCP elicitation.",
+          "isRequired": false,
           "format": "string",
           "isSecret": false,
           "name": "OKTA_CLIENT_ID"
         },
         {
-          "description": "Optional local lab collector URL, for example http://127.0.0.1:8765/v1/lab-events",
+          "description": "Authorization server ID. Defaults to org, the built-in Okta org authorization server.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_LAB_EVENT_URL"
+          "name": "OKTA_AUTH_SERVER"
         },
         {
-          "description": "Optional evidence mode. Set to proof to export non-usable token fingerprints and JWT claims.",
+          "description": "Exact space-delimited OAuth scopes requested during login. Defaults to openid profile email offline_access; groups and approved read-only okta.* scopes are optional.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_LAB_EVIDENCE"
+          "name": "OKTA_SCOPES"
         },
         {
-          "description": "Enable authorized session-security research tools. Disabled by default.",
+          "description": "Loopback OAuth callback host. Defaults to localhost; use 127.0.0.1 only when that exact host is registered in Okta.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_SECURITY_LAB"
+          "name": "OKTA_OAUTH_CALLBACK_HOST"
         },
         {
-          "description": "Optional local cookie-proof collector endpoint. Cookie values are redacted by default.",
+          "description": "Loopback OAuth callback port. Defaults to 8749; the matching redirect URI must be registered in Okta.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_COOKIE_PROOF_URL"
+          "name": "OKTA_OAUTH_CALLBACK_PORT"
         },
         {
-          "description": "Optional flag to also keep local cookie jars when cookie proof export is enabled.",
+          "description": "Browser Session redacted-proof refresh interval in milliseconds. Defaults to 300000 (five minutes).",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_PERSIST_COOKIE_JARS"
+          "name": "OKTA_MCP_BROWSER_PROOF_INTERVAL_MS"
         },
         {
-          "description": "Lab-only opt-in to include replayable cookie values in collector records.",
+          "description": "Live Browser Session inactivity timeout in milliseconds. Defaults to 1800000 (30 minutes).",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "OKTA_MCP_INCLUDE_COOKIE_VALUES"
+          "name": "OKTA_MCP_BROWSER_IDLE_TIMEOUT_MS"
+        },
+        {
+          "description": "Optional configuration and token directory override for managed deployments",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "OKTA_MCP_CONFIG_DIR"
         }
       ]
     }
