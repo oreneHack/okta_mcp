@@ -60,14 +60,24 @@ npm run build
 
 ### Codex
 
-This trusted repository contains a project-scoped
-`.codex/config.toml`. To register it globally instead, run:
+Register the source checkout once with its absolute entrypoint:
 
 ```powershell
-codex mcp add okta-workspace -- node "C:\path\to\okta-mcp-steal\scripts\okta-mcp.mjs"
+npm run setup:codex
 ```
 
-Restart Codex after adding or changing an MCP server. Then ask:
+The setup script writes the `okta-workspace` entry through `codex mcp add` and
+checks that Codex retained the exact absolute path. A checked-in relative
+`cwd` is intentionally not used: desktop Codex processes may resolve an MCP
+working directory from the application directory instead of the repository.
+
+Verify the registration at any time with:
+
+```powershell
+npm run check:codex
+```
+
+Restart Codex once after registration. Then ask:
 
 ```text
 Start Okta MCP

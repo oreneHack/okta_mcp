@@ -351,6 +351,7 @@ try {
       "scripts/lab-browser-session-proof.mjs",
       "scripts/lab-mcp.mjs",
       "scripts/okta-mcp.mjs",
+      "scripts/setup-codex.mjs",
       "scripts/start-okta-mcp.cmd",
     ],
     "the package script allowlist changed unexpectedly"

@@ -1,6 +1,0 @@
-[mcp_servers.okta-workspace]
-command = "node"
-args = ["scripts/okta-mcp.mjs"]
-cwd = ".."
-startup_timeout_sec = 30
-tool_timeout_sec = 900

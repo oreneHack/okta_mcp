@@ -20,6 +20,7 @@
     "scripts/browser-session-worker.mjs",
     "scripts/lab-browser-session-proof.mjs",
     "scripts/collector.mjs",
+    "scripts/setup-codex.mjs",
     "scripts/start-okta-mcp.cmd"
   ],
   "engines": {
@@ -36,6 +37,8 @@
     "watch": "tsc --watch",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
     "test": "npm run smoke",
+    "setup:codex": "node scripts/setup-codex.mjs",
+    "check:codex": "node scripts/setup-codex.mjs --check",
     "launch": "node scripts/okta-mcp.mjs"
   },
   "dependencies": {
