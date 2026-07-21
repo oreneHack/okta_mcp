@@ -26,6 +26,7 @@ import {
   makeConfig,
   redactClientId,
   saveFileConfig,
+  startupConfigPath,
   tokenCachePath,
   type OktaMcpConfig,
 } from "./config.js";
@@ -427,8 +428,12 @@ async function reset(): Promise<void> {
       );
     }
   }
-  if (fs.existsSync(configPath)) fs.rmSync(configPath);
-  console.log(`Removed local configuration and token cache from ${configDir}.`);
+  for (const savedPath of [startupConfigPath, configPath]) {
+    if (fs.existsSync(savedPath)) fs.rmSync(savedPath);
+  }
+  console.log(
+    `Removed saved startup mode, local configuration, and token cache from ${configDir}.`
+  );
 }
 
 function help(): void {

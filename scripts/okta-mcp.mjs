@@ -8,6 +8,8 @@ const cliCommands = new Set([
   "login",
   "status",
   "logout",
+  "reset",
+  "config-path",
   "help",
   "--help",
   "-h",

@@ -342,6 +342,32 @@ try {
   assert.match(contextReplacement.stderr, /Run .*logout.* before changing/);
   fs.rmSync(cliTokenPath);
 
+  const cliStartupPath = path.join(cliConfigDir, "startup.json");
+  fs.writeFileSync(
+    cliStartupPath,
+    JSON.stringify({
+      version: 1,
+      authenticationMode: "oidc",
+      orgUrl: orgReadConfig.orgUrl,
+      configuredAt: new Date().toISOString(),
+    })
+  );
+  const cliReset = spawnSync(
+    process.execPath,
+    ["scripts/okta-mcp.mjs", "reset"],
+    {
+      cwd: process.cwd(),
+      env: cleanEnv({ OKTA_MCP_CONFIG_DIR: cliConfigDir }),
+      encoding: "utf8",
+      timeout: 10_000,
+    }
+  );
+  assert.equal(cliReset.status, 0, cliReset.stderr);
+  assert.match(cliReset.stdout, /Removed saved startup mode/);
+  assert.equal(fs.existsSync(cliStartupPath), false);
+  assert.equal(fs.existsSync(path.join(cliConfigDir, "config.json")), false);
+  assert.equal(fs.existsSync(cliTokenPath), false);
+
   const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
   assert.deepEqual(
     packageJson.files.filter((file) => file.startsWith("scripts/")).sort(),

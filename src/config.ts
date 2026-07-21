@@ -37,6 +37,7 @@ export const configDir = configuredDirectory
   : path.join(os.homedir(), ".okta-workspace-mcp");
 export const configPath = path.join(configDir, "config.json");
 export const tokenCachePath = path.join(configDir, "tokens.json");
+export const startupConfigPath = path.join(configDir, "startup.json");
 
 function allowInsecureLoopbackHttp(): boolean {
   return ["1", "true", "yes"].includes(

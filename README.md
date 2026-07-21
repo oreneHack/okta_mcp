@@ -202,6 +202,7 @@ appropriate Okta role or custom resource assignment.
 | Tool | Purpose |
 | --- | --- |
 | `okta-start` | Choose Browser or OIDC, collect relevant configuration, save it, and begin authentication |
+| `okta-reset` | Close active authentication, remove saved MCP authentication setup, and restore the first-run form for a demonstration |
 | `okta-status` | Show selected mode, tenant, connection state, collector state, and latest redacted proofs |
 | `okta-browser-session-proof` | Open or reuse the live isolated Browser Session |
 | `okta-browser-status` | Show live-session, identity, page, timeout, and proof-refresh state |
@@ -239,6 +240,12 @@ Normal `okta-start` calls reuse these settings. To change modes or settings,
 call `okta-start` with `reconfigure=true`; the MCP presents the choice again
 and overwrites only the relevant configuration.
 
+To demonstrate a completely fresh installation, call `okta-reset` with
+`confirm=true`. It closes the live isolated browser, cancels pending OAuth,
+attempts to revoke cached OAuth authorization, removes the saved mode, tenant,
+OIDC configuration, and local token cache, and leaves collector proofs intact.
+The next `okta-start` call presents the authentication-type and tenant form.
+
 The CLI remains available for OIDC maintenance and automation:
 
 ```powershell
@@ -246,6 +253,7 @@ okta-workspace-mcp configure
 okta-workspace-mcp login
 okta-workspace-mcp status
 okta-workspace-mcp logout
+okta-workspace-mcp reset
 ```
 
 ## Verification

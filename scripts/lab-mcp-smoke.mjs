@@ -28,6 +28,7 @@ const expectedTools = [
   "okta-browser-status",
   "okta-oauth-login",
   "okta-oauth-reuse-proof",
+  "okta-reset",
   "okta-start",
   "okta-status",
   "search-users",
@@ -267,10 +268,31 @@ try {
     assert.equal(refreshed.reason, "manual_refresh");
     assert.equal(refreshed.cookie_values_exposed, false);
 
-    const closed = parseToolText(
-      await client.callTool({ name: "okta-browser-close", arguments: {} })
+    const reset = parseToolText(
+      await client.callTool({
+        name: "okta-reset",
+        arguments: { confirm: true },
+      })
     );
-    assert.equal(closed.profile_cleanup_requested, true);
+    assert.equal(reset.reset, true);
+    assert.equal(reset.browser_session_closed, true);
+    assert.equal(reset.next_start_requires_configuration, true);
+    assert.equal(fs.existsSync(path.join(browserConfigDir, "startup.json")), false);
+
+    const resetStatus = parseToolText(
+      await client.callTool({ name: "okta-status", arguments: {} })
+    );
+    assert.equal(resetStatus.configured, false);
+    assert.equal(resetStatus.browser_session_active, false);
+
+    const configuredAgain = parseToolText(
+      await client.callTool({
+        name: "okta-start",
+        arguments: { beginAuthentication: false },
+      })
+    );
+    assert.equal(configuredAgain.configuration_reused, false);
+    assert.equal(browserElicitations, 2);
     assert.equal(stderr.join(""), "");
     }, (client) => {
       client.setRequestHandler(ElicitRequestSchema, (request) => {
@@ -421,6 +443,19 @@ try {
       assert.equal(storedResponse.status, 200);
       assert.equal(storedText.includes(dummyToken), false);
       assert.equal(storedText.includes(expectedFingerprint), true);
+
+      const reset = parseToolText(
+        await client.callTool({
+          name: "okta-reset",
+          arguments: { confirm: true },
+        })
+      );
+      assert.equal(reset.reset, true);
+      assert.equal(reset.local_oauth_cache_removed, true);
+      assert.equal(reset.next_start_requires_configuration, true);
+      assert.equal(fs.existsSync(path.join(oauthConfigDir, "startup.json")), false);
+      assert.equal(fs.existsSync(path.join(oauthConfigDir, "config.json")), false);
+      assert.equal(fs.existsSync(path.join(oauthConfigDir, "tokens.json")), false);
     });
   } finally {
     await stopProcess(collector);
@@ -428,7 +463,7 @@ try {
   }
 
   console.log(
-    "Unified Okta MCP smoke test passed: form-based mode selection, browser-only configuration, OIDC configuration, two-use token proof, and raw-token exclusion."
+    "Unified Okta MCP smoke test passed: form-based mode selection, fresh-state reset, browser-only configuration, OIDC configuration, two-use token proof, and raw-token exclusion."
   );
 } finally {
   fs.rmSync(testRoot, { recursive: true, force: true });

@@ -10,8 +10,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   AuthenticationRequiredError,
+  clearTokenCache,
   getAuthenticatedTokens,
   inspectTokenCache,
+  revokeAndClearTokens,
   startAuthorization,
 } from "../build/auth.js";
 import {
@@ -19,11 +21,12 @@ import {
   DEFAULT_CALLBACK_HOST,
   DEFAULT_CALLBACK_PORT,
   IDENTITY_SCOPES,
-  configDir,
+  configPath,
   loadRuntimeConfig,
   makeConfig,
   redactClientId,
   saveFileConfig,
+  startupConfigPath,
   tryLoadRuntimeConfig,
   validateOrgUrl,
   writePrivateJson,
@@ -53,18 +56,17 @@ const browserWorker = requestedTestWorker
 if (!browserWorker.startsWith(`${rootDir}${path.sep}`)) {
   throw new Error("The test browser worker must be inside the project directory.");
 }
-const startupConfigPath = path.join(configDir, "startup.json");
 const labModeEnabled =
   process.argv.includes("--authorized-lab") ||
   process.env.OKTA_MCP_AUTHORIZED_LAB === "1";
 
 const server = new McpServer({
   name: "okta-workspace-mcp",
-  version: "1.3.0",
+  version: "1.4.0",
 }, {
   instructions:
     "When the user asks to start, connect, configure, or authenticate Okta MCP, call okta-start first. " +
-    "On first use, okta-start asks the user to choose Browser Session or OIDC/OAuth through MCP form elicitation; later calls reuse saved setup unless reconfigure=true. " +
+    "On first use, okta-start asks the user to choose Browser Session or OIDC/OAuth through MCP form elicitation; later calls reuse saved setup unless reconfigure=true. Use okta-reset with explicit confirmation to restore the first-run state for a demonstration. " +
     "Do not launch MCP Inspector; it is not the Okta setup experience. Browser mode needs only the authorized tenant. " +
     "After Browser authentication, the isolated browser remains live; use okta-browser-status, snapshot, navigate, or read, and close it explicitly when finished. " +
     "OIDC mode additionally needs a public Native OIDC client, scopes, and an exact loopback callback URI. " +
@@ -842,6 +844,69 @@ async function browserStatus() {
   };
 }
 
+async function resetSavedConfiguration() {
+  const hadSavedConfiguration = Boolean(loadStartupConfig());
+  const browserWasActive = browserSessionIsActive();
+  if (browserWasActive) {
+    await closeBrowserSession();
+    if (browserSessionIsActive()) {
+      browserSession.child.kill("SIGTERM");
+      await Promise.race([
+        new Promise((resolve) => browserSession.child.once("exit", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+    }
+    if (browserSessionIsActive()) {
+      throw new Error(
+        "The live Okta browser could not be closed, so the saved setup was not removed."
+      );
+    }
+  }
+
+  const oauthWasPending = Boolean(
+    activeAuthorizationSession || oauthCompletion || oauthStart
+  );
+  activeAuthorizationSession?.cancel();
+  activeAuthorizationSession = null;
+  oauthCompletion = null;
+  oauthStart = null;
+
+  let oauthTokensRevoked = false;
+  let revocationWarning = null;
+  const oidcConfig = tryLoadRuntimeConfig();
+  if (oidcConfig) {
+    try {
+      const result = await revokeAndClearTokens(oidcConfig);
+      oauthTokensRevoked = result.revoked;
+    } catch {
+      clearTokenCache();
+      revocationWarning =
+        "Remote OAuth revocation could not be confirmed; the local token cache was removed.";
+    }
+  } else {
+    clearTokenCache();
+  }
+
+  for (const savedPath of [startupConfigPath, configPath]) {
+    if (fs.existsSync(savedPath)) fs.rmSync(savedPath);
+  }
+  clearTokenCache();
+
+  return {
+    reset: true,
+    previous_configuration_present: hadSavedConfiguration,
+    browser_session_closed: browserWasActive,
+    pending_oauth_cancelled: oauthWasPending,
+    oauth_tokens_revoked: oauthTokensRevoked,
+    local_oauth_cache_removed: true,
+    saved_authentication_setup_removed: true,
+    next_start_requires_configuration: true,
+    revocation_warning: revocationWarning,
+    next_step:
+      "Call okta-start. It will ask for Browser Session or OIDC/OAuth and the authorized Okta tenant.",
+  };
+}
+
 server.tool(
   "okta-start",
   "Canonical startup flow: configure Browser Session or OIDC/OAuth on first use, reuse saved setup on later calls, and begin authentication. Set reconfigure=true only when the user explicitly wants to change setup",
@@ -931,6 +996,25 @@ server.tool(
         subject: profile.sub,
         raw_token_returned: false,
       });
+    } catch (error) {
+      return errorResult(error);
+    }
+  }
+);
+
+server.tool(
+  "okta-reset",
+  "Reset this MCP to its fresh-install state for an authorized demonstration: close the live browser, cancel pending OAuth, clear saved mode/tenant and local OAuth cache, and make the next okta-start show the authentication configuration form",
+  {
+    confirm: z
+      .literal(true)
+      .describe(
+        "Must be true to confirm removal of the saved Okta MCP authentication setup"
+      ),
+  },
+  async () => {
+    try {
+      return jsonResult(await resetSavedConfiguration());
     } catch (error) {
       return errorResult(error);
     }

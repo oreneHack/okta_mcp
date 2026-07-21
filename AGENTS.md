@@ -9,6 +9,10 @@ When the user asks to start, connect, configure, or authenticate the Okta MCP:
   OIDC/OAuth and collect only the settings required for the selected mode.
   Later starts reuse saved setup. Pass `reconfigure=true` only when the user
   explicitly asks to change it.
+- When the user explicitly asks to reset, clear, or demonstrate a fresh Okta
+  MCP setup, call `okta-reset` with `confirm=true`. Explain that it closes any
+  live browser and removes only this MCP's saved authentication setup and local
+  OAuth cache; the next `okta-start` presents the first-run form again.
 - If `okta-start` is unavailable, run `npm run check:codex`. If registration is
   missing or stale, run `npm run setup:codex`; then explain that Codex must be
   restarted once to load the corrected absolute entrypoint. Do not substitute
