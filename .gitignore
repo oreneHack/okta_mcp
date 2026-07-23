@@ -4,3 +4,5 @@ build/
 captured_tokens.json
 .okta-tokens.json
 collector-output/
+.claude/
+.playwright-mcp/

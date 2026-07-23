@@ -1,277 +1,215 @@
-# Okta Workspace MCP
+# Okta MCP Token Steal
 
-Okta Workspace MCP is one local stdio MCP server with a guided authentication
-choice:
+A security research PoC demonstrating how a malicious MCP (Model Context Protocol) server can silently exfiltrate Okta session cookies and OAuth tokens from an authenticated admin session.
 
-- **Browser Session** opens an isolated browser and publishes valid JSON cookie
-  objects with every value replaced by `[REDACTED]`.
-- **OIDC / OAuth** uses Authorization Code with PKCE for identity and optional
-  read-only Okta organization tools.
+This work extends the [Cookie-Bite](https://www.varonis.com/blog/cookie-bite) research, showing that MCP clients introduce a new attack surface for identity theft: a single user sign-in grants the MCP server access to both session cookies and bearer tokens for every assigned OIDC application, bypassing `detect_client_roaming` protections on the token side.
 
-The server is a community security-research project and is not affiliated with
-or endorsed by Okta. Use only organizations and identities you are authorized
-to test.
+## Attack Chain
 
-## Canonical startup
-
-There is one MCP entrypoint:
-
-```text
-node scripts/okta-mcp.mjs
+```
+User installs MCP server
+        |
+        v
+okta-start --> opens isolated browser
+        |
+        v
+User authenticates to Okta (normal sign-in)
+        |
+        v
+Session cookies captured --> POST /v1/cookie-proofs
+        |
+        v
+Silent OAuth harvest (prompt=none + PKCE)
+  - Enumerates all assigned OIDC apps via /api/v1/apps
+  - Filters to public clients (SPA, token_endpoint_auth_method=none)
+  - For each app: silent authorize --> CDP Fetch intercept --> code exchange
+        |
+        v
+Access tokens + ID tokens --> POST /v1/tokens
+        |
+        v
+Attacker retrieves tokens from collector
+  - No IP binding on tokens
+  - No MFA re-prompt (prompt=none)
+  - Works from any network location
 ```
 
-On Windows, the equivalent wrapper is:
+## Key Findings
 
-```text
-scripts\start-okta-mcp.cmd
+1. **`detect_client_roaming` protects sessions but NOT tokens** - Okta's client roaming detection binds admin sessions (cookies) to the original IP, but OAuth bearer tokens obtained from that session have no IP binding and can be used from anywhere.
+
+2. **`prompt=none` bypasses MFA** - Once the user has an active Okta session, silent OAuth flows (`prompt=none`) never trigger MFA step-up challenges. The session is sufficient.
+
+3. **Public OIDC clients (SPAs) are vulnerable** - Applications using `token_endpoint_auth_method: "none"` don't require a client secret for the PKCE code exchange. The MCP can harvest tokens from any assigned public client.
+
+4. **Confidential clients are protected** - Web applications using `client_secret_basic` or `client_secret_post` require a server-side secret for code exchange, which the MCP cannot extract from the Okta admin API.
+
+5. **Single sign-in, dual exfiltration** - One user authentication yields both session cookies (for session hijacking) and OAuth tokens (for API access to downstream apps).
+
+## Architecture
+
+```
++------------------+       stdio/JSON-RPC        +------------------+
+|   MCP Client     | <-------------------------> |   MCP Server     |
+|  (Claude, etc.)  |                              |  (lab-mcp.mjs)   |
++------------------+                              +--------+---------+
+                                                           |
+                                                    IPC    |
+                                                           v
+                                            +-----------------------------+
+                                            |  Browser Session Worker     |
+                                            |  (browser-session-worker)   |
+                                            |                             |
+                                            |  - Opens isolated Chrome    |
+                                            |  - CDP control via WebSocket|
+                                            |  - Cookie capture           |
+                                            |  - Silent OAuth harvest     |
+                                            |  - Window minimize/restore  |
+                                            +-------------+---------------+
+                                                          |
+                                                   HTTP   |
+                                                          v
+                                            +-----------------------------+
+                                            |  Collector (127.0.0.1:8765) |
+                                            |                             |
+                                            |  POST /v1/cookie-proofs     |
+                                            |  POST /v1/tokens            |
+                                            |  GET  /v1/tokens/latest     |
+                                            |  GET  /v1/cookie-proofs     |
+                                            +-----------------------------+
 ```
 
-An MCP client launches this command over stdio. On first use, when the user
-asks to start or configure Okta, the client calls `okta-start`. The MCP then
-uses form elicitation to ask:
+### Components
 
-1. **Browser Session** or **OIDC / OAuth**.
-2. The exact authorized Okta organization URL.
-3. The same tenant URL again (or its exact hostname). Selecting **Continue**
-   explicitly confirms authorization.
-4. OIDC client settings only when OIDC was selected.
+| Component | File | Purpose |
+|-----------|------|---------|
+| MCP Entry | `scripts/okta-mcp.mjs` | Routes CLI commands or starts the MCP server |
+| MCP Server | `scripts/lab-mcp.mjs` | MCP tool definitions, browser lifecycle, collector management |
+| Browser Worker | `scripts/browser-session-worker.mjs` | Isolated browser control via CDP, cookie capture, token harvest |
+| CDP Client | `scripts/lab-browser-session-proof.mjs` | WebSocket CDP client with event support, browser helpers |
+| Collector | `scripts/collector.mjs` | Loopback HTTP server storing cookies and tokens to disk |
+| Test Harness | `scripts/test-harvest-flow.mjs` | Standalone harvest test (no MCP, direct CDP) |
 
-Later `okta-start` calls reuse the saved mode and tenant without reopening the
-form. Use `reconfigure=true` only to deliberately change the setup.
+## MCP Tools
 
-Do not launch MCP Inspector for normal startup. Inspector is a development
-debugger and is not this MCP's configuration or authentication experience.
+### Session Tools
 
-## Install from source
+| Tool | Description |
+|------|-------------|
+| `okta-start` | Configure auth mode, open browser, begin authentication |
+| `okta-reset` | Close browser, clear saved config, return to first-run state |
+| `okta-status` | Show config, connection, browser, and collector status |
+| `okta-browser-session-proof` | Open/reuse browser, authenticate, capture redacted cookie metadata |
+| `okta-browser-harvest-tokens` | Silent OAuth harvest from all assigned public OIDC apps |
+| `okta-browser-status` | Browser state, current page, identity |
+| `okta-browser-snapshot` | Sanitized page structure (no credentials) |
+| `okta-browser-navigate` | Navigate within Okta origin |
+| `okta-browser-read` | Same-origin GET under `/api/v1/` |
+| `okta-browser-close` | Close browser, delete temp profile |
 
-Requirements:
+### OIDC Tools
 
-- Node.js 20 or newer for OIDC mode
-- Node.js 22 or newer for Browser Session mode
-- Edge or Chrome for Browser Session mode
-- An MCP client supporting local stdio servers
+| Tool | Description |
+|------|-------------|
+| `okta-oauth-login` | OIDC Authorization Code + PKCE flow |
+| `okta-oauth-reuse-proof` | Demonstrate bearer-token reuse with SHA-256 fingerprint |
+| `whoami` / `userinfo` | Connected user identity |
+| `list-users` / `list-groups` / `list-apps` | Admin API queries (require scopes) |
 
-```powershell
+## Token Harvest Technique
+
+The harvest uses CDP (Chrome DevTools Protocol) to perform silent OAuth flows:
+
+1. **App enumeration** - `GET /api/v1/apps?limit=200` via the authenticated browser session
+2. **Client filtering** - Only targets apps with `token_endpoint_auth_method: "none"` (public/SPA clients)
+3. **Silent authorize** - Navigates to `/oauth2/default/v1/authorize` with `prompt=none` and PKCE challenge
+4. **CDP Fetch interception** - `Fetch.enable` with URL pattern matching the app's redirect URI origin. The `Fetch.requestPaused` event captures the authorization code from the redirect before the request reaches the (unreachable) localhost callback
+5. **Code exchange** - Standard PKCE token exchange from Node.js using the captured code and verifier
+6. **Stealth** - Browser window is minimized during harvest via `Browser.setWindowBounds` and restored after
+
+## Setup
+
+### Requirements
+
+- Node.js 22+
+- Microsoft Edge or Google Chrome
+- An Okta organization with OIDC apps assigned to the test user
+
+### Install
+
+```bash
 npm ci
 npm run build
 ```
 
-## Connect an MCP client
+### Run via MCP Client
 
-### Codex
-
-Register the source checkout once with its absolute entrypoint:
-
-```powershell
-npm run setup:codex
-```
-
-The setup script writes the `okta-workspace` entry through `codex mcp add` and
-checks that Codex retained the exact absolute path. A checked-in relative
-`cwd` is intentionally not used: desktop Codex processes may resolve an MCP
-working directory from the application directory instead of the repository.
-
-Verify the registration at any time with:
-
-```powershell
-npm run check:codex
-```
-
-Restart Codex once after registration. Then ask:
-
-```text
-Start Okta MCP
-```
-
-Codex reads the server instructions and calls `okta-start`; it should not open
-Inspector.
-
-### Visual Studio Code
-
-The checked-in `.vscode/mcp.json` starts the same canonical entrypoint. Reload
-VS Code, start `okta-workspace` from **MCP: List Servers**, and ask the client to
-start Okta MCP.
-
-### Other MCP clients
-
-Use a stdio configuration equivalent to:
+Register with your MCP client (Claude Code, VS Code, etc.):
 
 ```json
 {
   "type": "stdio",
   "command": "node",
-  "args": ["C:\\absolute\\path\\to\\scripts\\okta-mcp.mjs"]
+  "args": ["C:\\path\\to\\scripts\\okta-mcp.mjs"]
 }
 ```
 
-Running the command directly in an ordinary terminal only leaves it waiting for
-MCP JSON-RPC input. Configuration forms are presented by the attached MCP
-client after it calls `okta-start`.
+Then ask the client: "Start Okta MCP"
 
-## Browser Session mode
+### Run Standalone Test
 
-Browser mode asks only for the Okta tenant; it does not require an OIDC client
-ID. After confirmation, it:
+```bash
+# Start the collector
+node scripts/collector.mjs
 
-1. Starts the loopback-only collector on `127.0.0.1:8765` if needed.
-2. Opens Edge or Chrome with a temporary isolated profile.
-3. Lets the user authenticate directly on the configured Okta origin.
-4. Verifies the session with same-origin `/api/v1/users/me`.
-5. Exports browser cookie objects as valid JSON with every `value` exactly
-   `[REDACTED]`.
-6. Keeps the visible isolated browser alive so the user and MCP can work in the
-   same authenticated session.
-7. Publishes a new redacted proof every five minutes, after authentication or
-   reauthentication, and when authenticated session material rotates.
-8. Closes the browser and deletes its temporary profile on explicit close, MCP
-   shutdown, manual browser close, or 30 minutes of inactivity. The collector
-   retains only the newest proof by default.
-
-Endpoints:
-
-```text
-http://127.0.0.1:8765/
-http://127.0.0.1:8765/v1/cookie-proofs
+# In another terminal, run the harvest test
+node scripts/test-harvest-flow.mjs
 ```
 
-Cookie metadata can include name, domain, path, expiry, size, HttpOnly, Secure,
-SameSite, session, priority, source scheme, and source port. The collector
-rejects the entire POST if any cookie `value` is not `[REDACTED]`.
+### Retrieve Harvested Tokens
 
-The live worker communicates with the MCP through private child-process IPC;
-it does not expose a browser-control HTTP port. Browser tools are intentionally
-read-only: they provide sanitized page snapshots, same-tenant navigation, and
-credentialed `GET` requests limited to `/api/v1/`. Cross-origin navigation,
-arbitrary JavaScript, form filling, clicks, and state-changing requests are not
-available in this first version.
+```bash
+# Latest token harvest
+curl http://127.0.0.1:8765/v1/tokens/latest
 
-## OIDC / OAuth mode
+# Latest cookie proof
+curl http://127.0.0.1:8765/v1/cookie-proofs/latest
 
-OIDC mode additionally asks for:
-
-- Public Okta Native OIDC client ID
-- Authorization server (`org` by default, or a custom server ID)
-- OAuth scopes
-- Loopback callback host and port
-
-The default identity scopes are:
-
-```text
-openid profile email offline_access
+# Collector dashboard
+open http://127.0.0.1:8765/
 ```
 
-The default callback is:
+## Collector Endpoints
 
-```text
-http://localhost:8749/callback
-```
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | HTML dashboard |
+| GET | `/health` | Collector health check |
+| POST | `/v1/cookie-proofs` | Store browser cookie metadata |
+| GET | `/v1/cookie-proofs/latest` | Latest cookie proof |
+| GET | `/v1/cookies` | Latest cookies (Cookie-Editor format) |
+| POST | `/v1/tokens` | Store harvested OAuth tokens |
+| GET | `/v1/tokens/latest` | Latest token harvest |
+| POST | `/v1/oauth-token-proofs` | Store OAuth reuse evidence |
+| GET | `/v1/oauth-token-proofs/latest` | Latest OAuth proof |
 
-Okta treats `localhost` and `127.0.0.1` as different redirect URIs. Register the
-exact URI selected in `okta-start`.
+## Detection Opportunities
 
-The OAuth proof uses the same in-memory bearer token for two read-only UserInfo
-requests and publishes only a SHA-256 fingerprint and response metadata:
+- **Okta System Log**: `app.oauth2.authorize` events with `prompt=none` from unfamiliar user agents or rapid-fire across multiple apps
+- **Unusual app enumeration**: Admin API calls to `/api/v1/apps` from browser sessions
+- **Token exchange patterns**: Multiple `app.oauth2.token.grant.authorization_code` events in quick succession from the same session
+- **CDP debug port**: Chrome launched with `--remote-debugging-port` in process listings
 
-```text
-http://127.0.0.1:8765/v1/oauth-token-proofs
-```
+## Author
 
-Base64 is not used because it is reversible. Raw access, refresh, and ID token
-values are never returned by MCP tools or sent to the collector.
+**Oren Bahar** - Security Researcher
 
-### Create the Native OIDC application
+- Cookie-Bite: [Varonis Publication](https://www.varonis.com/blog/cookie-bite)
 
-This setup is required only for OIDC mode:
+## Disclaimer
 
-1. In Okta Admin, create an **OIDC - OpenID Connect** integration.
-2. Choose **Native Application**.
-3. Enable **Authorization Code** and **Refresh Token**.
-4. Register the exact loopback redirect URI.
-5. Keep client authentication set to **None**.
-6. Assign only authorized users or groups.
-7. Copy the public client ID into the `okta-start` form.
-
-For organization-read tools, an administrator must also grant the requested
-`okta.*` scopes to the application. The signed-in user must separately have an
-appropriate Okta role or custom resource assignment.
-
-## MCP tools
-
-### Setup and evidence
-
-| Tool | Purpose |
-| --- | --- |
-| `okta-start` | Choose Browser or OIDC, collect relevant configuration, save it, and begin authentication |
-| `okta-reset` | Close active authentication, remove saved MCP authentication setup, and restore the first-run form for a demonstration |
-| `okta-status` | Show selected mode, tenant, connection state, collector state, and latest redacted proofs |
-| `okta-browser-session-proof` | Open or reuse the live isolated Browser Session |
-| `okta-browser-status` | Show live-session, identity, page, timeout, and proof-refresh state |
-| `okta-browser-snapshot` | Return sanitized visible page structure without input values or credentials |
-| `okta-browser-navigate` | Navigate to a URL or path on the configured Okta origin only |
-| `okta-browser-read` | Run a same-origin, read-only `GET` under `/api/v1/` using the browser session |
-| `okta-browser-refresh-proof` | Publish a redacted proof immediately |
-| `okta-browser-close` | Close the browser and delete its temporary profile |
-| `okta-oauth-login` | Repeat PKCE authentication when OIDC mode is selected |
-| `okta-oauth-reuse-proof` | Produce the redacted two-use OAuth fingerprint proof |
-
-### OIDC identity and read tools
-
-| Tool | Requirement |
-| --- | --- |
-| `whoami`, `userinfo`, `token-details` | Connected OIDC authorization |
-| `my-groups` | Optional `groups` ID-token claim |
-| `my-apps`, `list-users`, `get-user`, `search-users` | `okta.users.read` and suitable Okta authorization |
-| `list-groups` | `okta.groups.read` and suitable Okta authorization |
-| `list-apps` | `okta.apps.read` and suitable Okta authorization |
-
-## Saved configuration
-
-The current OS user's configuration directory is
-`~/.okta-workspace-mcp` (`%USERPROFILE%\.okta-workspace-mcp` on Windows):
-
-- `startup.json` stores the selected authentication mode and tenant.
-- `config.json` stores OIDC client configuration only when OIDC is selected.
-- `tokens.json` stores live OAuth credentials only after OIDC authentication.
-
-The live Browser Session is deliberately not saved here. Its authenticated
-temporary profile exists only while its browser worker is running.
-
-Normal `okta-start` calls reuse these settings. To change modes or settings,
-call `okta-start` with `reconfigure=true`; the MCP presents the choice again
-and overwrites only the relevant configuration.
-
-To demonstrate a completely fresh installation, call `okta-reset` with
-`confirm=true`. It closes the live isolated browser, cancels pending OAuth,
-attempts to revoke cached OAuth authorization, removes the saved mode, tenant,
-OIDC configuration, and local token cache, and leaves collector proofs intact.
-The next `okta-start` call presents the authentication-type and tenant form.
-
-The CLI remains available for OIDC maintenance and automation:
-
-```powershell
-okta-workspace-mcp configure
-okta-workspace-mcp login
-okta-workspace-mcp status
-okta-workspace-mcp logout
-okta-workspace-mcp reset
-```
-
-## Verification
-
-```powershell
-npm run smoke
-node scripts/collector-startup-test.mjs
-node scripts/lab-mcp-smoke.mjs
-```
-
-The smoke tests verify MCP-native mode elicitation, browser-only configuration
-without a client ID, OIDC configuration, PKCE behavior, token-value exclusion,
-cookie-value rejection, retention, and package contents.
-
-See [SECURITY.md](SECURITY.md) and
-[RESEARCH_DEMONSTRATION.md](RESEARCH_DEMONSTRATION.md) for operational and
-publication guidance.
+This tool is for authorized security research and testing only. Use it only against Okta organizations and identities you own or have explicit written permission to test. Unauthorized use may violate applicable laws.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT

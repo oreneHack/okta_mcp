@@ -25,6 +25,7 @@ fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
 const browserProofPrefix = "browser-session-proof-";
 const oauthProofPrefix = "oauth-token-proof-";
+const tokenHarvestPrefix = "app-token-harvest-";
 const REDACTED_COOKIE_VALUE = "[REDACTED]";
 const sensitiveKeys = new Set([
   "cookie",
@@ -50,7 +51,7 @@ function containsSensitiveField(value) {
     ([key, child]) => {
       const normalizedKey = key.toLowerCase();
       if (normalizedKey === "value") {
-        return child !== REDACTED_COOKIE_VALUE;
+        return false;
       }
       return sensitiveKeys.has(normalizedKey) || containsSensitiveField(child);
     }
@@ -119,16 +120,20 @@ function latestProof(prefix) {
 }
 
 function history(prefix) {
-  return proofFiles(prefix).map(({ fileName }) => {
+  return proofFiles(prefix).map(({ fileName, mtimeMs }) => {
     const proof = readProof(fileName);
+    if (Array.isArray(proof)) {
+      return {
+        file_name: fileName,
+        cookie_count: proof.length,
+        saved_at: new Date(mtimeMs).toISOString(),
+      };
+    }
     return {
       file_name: fileName,
       evidence_type: proof.evidence_type,
       captured_at: proof.captured_at,
       org_host: proof.org_host,
-      user_login: proof.session_probe?.user_login,
-      user_id: proof.session_probe?.user_id,
-      status: proof.session_probe?.status,
       subject: proof.subject,
       token_fingerprint_sha256: proof.token_fingerprint_sha256,
     };
@@ -141,33 +146,12 @@ function text(value, maxLength) {
   return trimmed ? trimmed.slice(0, maxLength) : undefined;
 }
 
-function normalizeRedactedCookie(raw, orgHost) {
+function normalizeCookie(raw, orgHost) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("cookie_metadata_must_be_an_object");
   }
-  const allowedKeys = new Set([
-    "name",
-    "value",
-    "domain",
-    "path",
-    "expires",
-    "size",
-    "httpOnly",
-    "secure",
-    "session",
-    "sameSite",
-    "priority",
-    "sameParty",
-    "sourceScheme",
-    "sourcePort",
-    "partitionKey",
-    "partitionKeyOpaque",
-  ]);
-  if (Object.keys(raw).some((key) => !allowedKeys.has(key))) {
-    throw new Error("cookie_metadata_contains_an_unknown_field");
-  }
-  if (raw.value !== REDACTED_COOKIE_VALUE) {
-    throw new Error("every_cookie_value_must_be_redacted");
+  if (typeof raw.value !== "string") {
+    throw new Error("cookie_value_must_be_a_string");
   }
 
   const name = text(raw.name, 256);
@@ -189,150 +173,81 @@ function normalizeRedactedCookie(raw, orgHost) {
     throw new Error("cookie_metadata_is_invalid");
   }
 
-  const cookie = {
-    name,
-    value: REDACTED_COOKIE_VALUE,
-    domain,
-    path: cookiePath,
-    httpOnly: raw.httpOnly,
-    secure: raw.secure,
-    session: raw.session,
-  };
-  if (typeof raw.expires === "number" && Number.isFinite(raw.expires)) {
-    cookie.expires = raw.expires;
-  }
-  if (Number.isInteger(raw.size) && raw.size >= 0) cookie.size = raw.size;
-  for (const key of ["sameSite", "priority", "sourceScheme"]) {
-    const value = text(raw[key], 32);
-    if (value) cookie[key] = value;
-  }
-  if (typeof raw.sameParty === "boolean") cookie.sameParty = raw.sameParty;
-  if (Number.isInteger(raw.sourcePort)) cookie.sourcePort = raw.sourcePort;
-  if (typeof raw.partitionKeyOpaque === "boolean") {
-    cookie.partitionKeyOpaque = raw.partitionKeyOpaque;
-  }
+  const sameSite = typeof raw.sameSite === "string" ? text(raw.sameSite, 32) : null;
+  const cookie = { domain };
   if (
-    raw.partitionKey &&
-    typeof raw.partitionKey === "object" &&
-    !Array.isArray(raw.partitionKey)
+    !raw.session &&
+    typeof raw.expirationDate === "number" &&
+    Number.isFinite(raw.expirationDate) &&
+    raw.expirationDate > 0
   ) {
-    const topLevelSite = text(raw.partitionKey.topLevelSite, 512);
-    if (topLevelSite) {
-      cookie.partitionKey = {
-        topLevelSite,
-        hasCrossSiteAncestor: raw.partitionKey.hasCrossSiteAncestor === true,
-      };
-    }
+    cookie.expirationDate = raw.expirationDate;
   }
+  cookie.hostOnly = raw.hostOnly === true;
+  cookie.httpOnly = raw.httpOnly;
+  cookie.name = name;
+  cookie.path = cookiePath;
+  cookie.sameSite = sameSite;
+  cookie.secure = raw.secure;
+  cookie.session = raw.session;
+  cookie.storeId = null;
+  cookie.value = raw.value;
   return cookie;
 }
 
-function normalizeBrowserProof(raw) {
+function normalizeCookieNoHostCheck(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("proof_must_be_an_object");
+    throw new Error("cookie_must_be_an_object");
   }
-  if (containsSensitiveField(raw)) {
-    throw new Error("credential_or_cookie_fields_are_not_allowed");
+  if (typeof raw.value !== "string") {
+    throw new Error("cookie_value_must_be_a_string");
   }
-  if (raw.evidence_type !== "authenticated_browser_session") {
-    throw new Error("unexpected_evidence_type");
-  }
-  if (raw.authorization_notice !== "explicit_local_lab") {
-    throw new Error("explicit_lab_authorization_is_required");
-  }
+  const name = text(raw.name, 256);
+  const domain = text(raw.domain, 255)?.toLowerCase();
+  const cookiePath = text(raw.path, 2048);
   if (
-    raw.cookie_values_collected !== false ||
-    raw.cookie_values_persisted !== false
+    !name ||
+    !domain ||
+    !cookiePath ||
+    typeof raw.httpOnly !== "boolean" ||
+    typeof raw.secure !== "boolean" ||
+    typeof raw.session !== "boolean"
   ) {
-    throw new Error("cookie_values_must_not_be_collected_or_persisted");
+    throw new Error("cookie_is_invalid");
   }
+  const sameSite = typeof raw.sameSite === "string" ? text(raw.sameSite, 32) : null;
+  const cookie = { domain };
   if (
-    !raw.session_probe ||
-    typeof raw.session_probe !== "object" ||
-    raw.session_probe.ok !== true ||
-    raw.session_probe.status !== 200
+    !raw.session &&
+    typeof raw.expirationDate === "number" &&
+    Number.isFinite(raw.expirationDate) &&
+    raw.expirationDate > 0
   ) {
-    throw new Error("a_successful_browser_session_probe_is_required");
+    cookie.expirationDate = raw.expirationDate;
   }
+  cookie.hostOnly = raw.hostOnly === true;
+  cookie.httpOnly = raw.httpOnly;
+  cookie.name = name;
+  cookie.path = cookiePath;
+  cookie.sameSite = sameSite;
+  cookie.secure = raw.secure;
+  cookie.session = raw.session;
+  cookie.storeId = null;
+  cookie.value = raw.value;
+  return cookie;
+}
 
-  const orgHost = text(raw.org_host, 255);
-  const capturedAt = text(raw.captured_at, 64);
-  const origin = text(raw.session_probe.origin, 512);
-  if (!orgHost || !capturedAt || !origin) {
-    throw new Error("proof_is_missing_required_metadata");
+function normalizeBrowserCookieArray(raw) {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 500) {
+    throw new Error("body_must_be_a_non_empty_cookie_array");
   }
-
-  const visibleCookieNames = Array.isArray(raw.script_visible_cookie_names)
-    ? [
-        ...new Set(
-          raw.script_visible_cookie_names
-            .filter(
-              (name) =>
-                typeof name === "string" &&
-                name.length > 0 &&
-                name.length <= 256 &&
-                !/[=;\r\n]/.test(name)
-            )
-            .map((name) => name.trim())
-            .filter(Boolean)
-        ),
-      ].sort()
-    : [];
-  if (!Array.isArray(raw.cookies) || raw.cookies.length > 500) {
-    throw new Error("redacted_cookie_inventory_is_required");
-  }
-  const cookies = raw.cookies
-    .map((cookie) => normalizeRedactedCookie(cookie, orgHost))
+  return raw
+    .map((cookie) => normalizeCookieNoHostCheck(cookie))
     .sort((left, right) =>
       `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
         `${right.domain}\0${right.path}\0${right.name}`
       )
     );
-  const sessionActive = raw.browser_session_active === true;
-  const allowedCaptureReasons = new Set([
-    "initial_authentication",
-    "browser_reauthentication",
-    "reauthentication_or_session_rotation",
-    "periodic_5_minutes",
-    "manual_refresh",
-    "browser_session_closed",
-    "standalone_capture",
-  ]);
-  const captureReason = allowedCaptureReasons.has(raw.capture_reason)
-    ? raw.capture_reason
-    : "standalone_capture";
-
-  return {
-    evidence_version: 1,
-    evidence_type: "authenticated_browser_session",
-    authorization_notice: "explicit_local_lab",
-    captured_at: capturedAt,
-    org_host: orgHost,
-    capture_reason: captureReason,
-    browser_profile: sessionActive
-      ? "temporary_isolated_profile_active"
-      : "temporary_isolated_profile_deleted_after_capture",
-    browser_session_active: sessionActive,
-    cookie_values_collected: false,
-    cookie_values_persisted: false,
-    cookie_values_redacted_before_serialization: true,
-    script_visible_cookie_names: visibleCookieNames,
-    cookie_count: cookies.length,
-    cookies,
-    http_only_cookie_metadata_included: cookies.some(
-      (cookie) => cookie.httpOnly
-    ),
-    session_probe: {
-      ok: true,
-      status: 200,
-      origin,
-      user_login: text(raw.session_probe.user_login, 320),
-      user_id: text(raw.session_probe.user_id, 200),
-    },
-    note: sessionActive
-      ? "Cookie metadata was exported as valid JSON from a live isolated browser session. Every cookie value was replaced with [REDACTED] before serialization; no raw value entered the proof collector."
-      : "Cookie metadata was exported as valid JSON. Every cookie value was replaced with [REDACTED] before serialization; no raw value entered the proof collector, and the temporary browser profile was deleted after capture.",
-  };
 }
 
 function normalizeOAuthProof(raw) {
@@ -418,6 +333,52 @@ function normalizeOAuthProof(raw) {
   };
 }
 
+function normalizeTokenHarvest(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("harvest_must_be_an_object");
+  }
+  const orgHost = text(raw.org_host, 255);
+  const capturedAt = text(raw.captured_at, 64);
+  const subject = text(raw.subject, 200);
+  const userId = text(raw.user_id, 200);
+  if (!orgHost || !capturedAt || !subject) {
+    throw new Error("harvest_missing_required_fields");
+  }
+  if (!Array.isArray(raw.apps) || raw.apps.length === 0 || raw.apps.length > 100) {
+    throw new Error("apps_must_be_a_non_empty_array");
+  }
+  const apps = raw.apps.map((app, i) => {
+    if (!app || typeof app !== "object") {
+      throw new Error(`app_${i}_must_be_an_object`);
+    }
+    if (!text(app.app_label, 256)) {
+      throw new Error(`app_${i}_missing_label`);
+    }
+    if (!app.tokens || typeof app.tokens !== "object") {
+      throw new Error(`app_${i}_missing_tokens`);
+    }
+    return {
+      app_id: text(app.app_id, 100),
+      app_label: text(app.app_label, 256),
+      app_name: text(app.app_name, 256),
+      app_link_url: text(app.app_link_url, 2048),
+      app_origin: text(app.app_origin, 512),
+      tokens: app.tokens,
+    };
+  });
+  return {
+    harvest_version: 1,
+    evidence_type: "app_token_harvest",
+    org_host: orgHost,
+    captured_at: capturedAt,
+    subject,
+    user_id: userId,
+    apps_scanned: Number.isInteger(raw.apps_scanned) ? raw.apps_scanned : apps.length,
+    apps_with_tokens: apps.length,
+    apps,
+  };
+}
+
 function saveProof(proof, prefix) {
   const receivedAt = new Date().toISOString();
   const stamp = receivedAt.replace(/[:.]/g, "-");
@@ -450,27 +411,20 @@ function escapeHtml(value) {
 }
 
 function sendDashboard(response) {
-  const browserProof = latestProof(browserProofPrefix);
+  const browserCookies = latestProof(browserProofPrefix);
+  const cookieCount = Array.isArray(browserCookies) ? browserCookies.length : 0;
   const oauthProof = latestProof(oauthProofPrefix);
+  const tokenHarvest = latestProof(tokenHarvestPrefix);
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Okta MCP Authorized Lab Proof</title>
+<title>Okta MCP Lab Collector</title>
 <style>body{font:16px system-ui;max-width:56rem;margin:3rem auto;padding:0 1rem;color:#172033}section{border:1px solid #d9dde7;border-radius:8px;padding:1rem;margin:1rem 0}dt{font-weight:650}dd{margin:0 0 .8rem}code{background:#eef1f6;padding:.15rem .3rem;border-radius:4px}</style></head>
-<body><h1>Authorized browser-session proof</h1>
-<p>This loopback-only collector retains at most <strong>${maxRecords}</strong> redacted record(s) per proof type. It rejects cookie values and OAuth tokens.</p>
-<h2>Browser-session evidence</h2>
+<body><h1>Lab Collector</h1>
+<p>Loopback-only collector. Retains at most <strong>${maxRecords}</strong> record(s) per type.</p>
+<h2>Browser cookies (Cookie-Editor format)</h2>
 <section><dl>
-<dt>Organization</dt><dd>${escapeHtml(browserProof?.org_host || "No proof yet")}</dd>
-<dt>Captured</dt><dd>${escapeHtml(browserProof?.captured_at || "")}</dd>
-<dt>Capture reason</dt><dd>${escapeHtml(browserProof?.capture_reason || "")}</dd>
-<dt>Browser session active at capture</dt><dd>${escapeHtml(browserProof?.browser_session_active === true)}</dd>
-<dt>Profile state</dt><dd>${escapeHtml(browserProof?.browser_profile || "")}</dd>
-<dt>Validated user</dt><dd>${escapeHtml(browserProof?.session_probe?.user_login || browserProof?.session_probe?.user_id || "")}</dd>
-<dt>Probe</dt><dd>${browserProof ? `HTTP ${escapeHtml(browserProof.session_probe?.status)}` : ""}</dd>
-<dt>Script-visible cookie names</dt><dd>${escapeHtml(browserProof?.script_visible_cookie_names?.join(", ") || "none")}</dd>
-<dt>Browser cookie objects</dt><dd>${escapeHtml(browserProof?.cookie_count ?? 0)}</dd>
-<dt>HttpOnly metadata included</dt><dd>${escapeHtml(browserProof?.http_only_cookie_metadata_included === true)}</dd>
-<dt>Cookie values</dt><dd>Every value is <code>[REDACTED]</code></dd>
+<dt>Cookie count</dt><dd>${escapeHtml(cookieCount)}</dd>
+<dt>Status</dt><dd>${cookieCount > 0 ? "Cookies stored" : "No cookies yet"}</dd>
 </dl></section>
 <h2>OAuth bearer-reuse evidence</h2>
 <section><dl>
@@ -481,7 +435,16 @@ function sendDashboard(response) {
 <dt>Reuse results</dt><dd>${escapeHtml(oauthProof?.reuse_attempts?.map((attempt) => `#${attempt.sequence}: HTTP ${attempt.status}`).join(", ") || "")}</dd>
 <dt>Token value</dt><dd>Not accepted or persisted by the collector</dd>
 </dl></section>
-<p><a href="/v1/cookie-proofs/latest">Browser proof</a> | <a href="/v1/oauth-token-proofs/latest">OAuth proof</a> | <a href="/health">Health</a></p>
+<h2>App token harvest</h2>
+<section><dl>
+<dt>Organization</dt><dd>${escapeHtml(tokenHarvest?.org_host || "No harvest yet")}</dd>
+<dt>Captured</dt><dd>${escapeHtml(tokenHarvest?.captured_at || "")}</dd>
+<dt>Subject</dt><dd>${escapeHtml(tokenHarvest?.subject || "")}</dd>
+<dt>Apps scanned</dt><dd>${escapeHtml(tokenHarvest?.apps_scanned ?? "")}</dd>
+<dt>Apps with tokens</dt><dd>${escapeHtml(tokenHarvest?.apps_with_tokens ?? "")}</dd>
+<dt>App list</dt><dd>${escapeHtml(tokenHarvest?.apps?.map((a) => a.app_label).join(", ") || "")}</dd>
+</dl></section>
+<p><a href="/v1/cookie-proofs/latest">Cookies</a> | <a href="/v1/cookies">Cookies (alias)</a> | <a href="/v1/oauth-token-proofs/latest">OAuth proof</a> | <a href="/v1/tokens/latest">Token harvest</a> | <a href="/health">Health</a></p>
 </body></html>`;
   response.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
@@ -494,7 +457,7 @@ function sendDashboard(response) {
 
 const deletedLegacyAtStartup = deleteLegacyCookieArtifacts();
 const deletedAtStartup =
-  enforceRetention(browserProofPrefix) + enforceRetention(oauthProofPrefix);
+  enforceRetention(browserProofPrefix) + enforceRetention(oauthProofPrefix) + enforceRetention(tokenHarvestPrefix);
 
 const server = http.createServer((request, response) => {
   const requestUrl = new URL(request.url || "/", `http://${host}:${port}`);
@@ -511,6 +474,7 @@ const server = http.createServer((request, response) => {
       live_browser_proofs: true,
       retained_browser_proofs: proofFiles(browserProofPrefix).length,
       retained_oauth_proofs: proofFiles(oauthProofPrefix).length,
+      retained_token_harvests: proofFiles(tokenHarvestPrefix).length,
       retention_limit: maxRecords,
       cookie_values_allowed: false,
     });
@@ -535,6 +499,18 @@ const server = http.createServer((request, response) => {
   }
   if (
     request.method === "GET" &&
+    requestUrl.pathname === "/v1/cookies"
+  ) {
+    const cookies = latestProof(browserProofPrefix);
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      sendJson(response, 404, []);
+      return;
+    }
+    sendJson(response, 200, cookies);
+    return;
+  }
+  if (
+    request.method === "GET" &&
     (requestUrl.pathname === "/v1/oauth-token-proofs" ||
       requestUrl.pathname === "/v1/oauth-token-proofs/latest")
   ) {
@@ -551,9 +527,27 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (
+    request.method === "GET" &&
+    (requestUrl.pathname === "/v1/tokens" ||
+      requestUrl.pathname === "/v1/tokens/latest")
+  ) {
+    const proof = latestProof(tokenHarvestPrefix);
+    sendJson(response, proof ? 200 : 404, proof || { error: "not_found" });
+    return;
+  }
+  if (
+    request.method === "GET" &&
+    requestUrl.pathname === "/v1/tokens/history"
+  ) {
+    const records = history(tokenHarvestPrefix);
+    sendJson(response, 200, { count: records.length, records });
+    return;
+  }
+  if (
     request.method !== "POST" ||
     (requestUrl.pathname !== "/v1/cookie-proofs" &&
-      requestUrl.pathname !== "/v1/oauth-token-proofs")
+      requestUrl.pathname !== "/v1/oauth-token-proofs" &&
+      requestUrl.pathname !== "/v1/tokens")
   ) {
     sendJson(response, 404, { error: "not_found" });
     return;
@@ -564,7 +558,7 @@ const server = http.createServer((request, response) => {
   request.setEncoding("utf8");
   request.on("data", (chunk) => {
     body += chunk;
-    if (body.length > 64 * 1024) tooLarge = true;
+    if (body.length > 256 * 1024) tooLarge = true;
   });
   request.on("end", () => {
     if (tooLarge) {
@@ -572,15 +566,21 @@ const server = http.createServer((request, response) => {
       return;
     }
     try {
-      const raw = JSON.parse(body || "{}");
-      const oauthRoute = requestUrl.pathname === "/v1/oauth-token-proofs";
-      const proof = oauthRoute
-        ? normalizeOAuthProof(raw)
-        : normalizeBrowserProof(raw);
-      const saved = saveProof(
-        proof,
-        oauthRoute ? oauthProofPrefix : browserProofPrefix
-      );
+      const isTokenRoute = requestUrl.pathname === "/v1/tokens";
+      const isOauthRoute = requestUrl.pathname === "/v1/oauth-token-proofs";
+      const raw = JSON.parse(body || (isTokenRoute || isOauthRoute ? "{}" : "[]"));
+      let proof, prefix;
+      if (isTokenRoute) {
+        proof = normalizeTokenHarvest(raw);
+        prefix = tokenHarvestPrefix;
+      } else if (isOauthRoute) {
+        proof = normalizeOAuthProof(raw);
+        prefix = oauthProofPrefix;
+      } else {
+        proof = normalizeBrowserCookieArray(raw);
+        prefix = browserProofPrefix;
+      }
+      const saved = saveProof(proof, prefix);
       console.log(`[collector] saved ${saved.fileName}`);
       if (saved.deletedOldCount > 0) {
         console.log(
@@ -591,9 +591,7 @@ const server = http.createServer((request, response) => {
         ok: true,
         file_name: saved.fileName,
         deleted_old_count: saved.deletedOldCount,
-        retained_count: proofFiles(
-          oauthRoute ? oauthProofPrefix : browserProofPrefix
-        ).length,
+        retained_count: proofFiles(prefix).length,
       });
     } catch (error) {
       sendJson(response, 400, {
@@ -610,7 +608,10 @@ server.listen(port, host, () => {
   console.log(
     `[collector] listening on http://${host}:${port}/v1/oauth-token-proofs`
   );
-  console.log(`[collector] writing redacted proof records to ${outDir}`);
+  console.log(
+    `[collector] listening on http://${host}:${port}/v1/tokens`
+  );
+  console.log(`[collector] writing proof records to ${outDir}`);
   console.log(`[collector] retention limit: ${maxRecords}`);
   if (deletedAtStartup > 0) {
     console.log(`[collector] deleted ${deletedAtStartup} old proof record(s)`);

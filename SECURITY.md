@@ -1,72 +1,95 @@
-# Security Policy
+# Security and data-handling policy
 
-## Scope
+## Application scope
 
-Okta Workspace MCP is one local stdio MCP server with explicit Browser Session
-and OIDC/OAuth modes. Browser mode publishes redacted cookie metadata. OIDC mode
-handles access and refresh tokens for the organization explicitly configured by
-the user and uses Authorization Code with PKCE.
+Okta Workspace MCP is a local stdio integration with Browser Session and
+OIDC/OAuth authentication modes. It is designed for organizations and user
+identities that the operator is permitted to access.
 
-The default permission set is identity-only. Organization-read access must be
-enabled explicitly and remains subject to the OIDC application's Okta API scope
-grants and the signed-in user's Okta roles/resource assignments.
+Browser Session mode opens a temporary isolated browser and publishes redacted
+session metadata to a loopback-only local service. OIDC/OAuth mode uses
+Authorization Code with PKCE and can access identity information and optional
+read-only Okta organization APIs.
 
-An Okta administrator grants requested `okta.*` management scopes to the OIDC
-application in advance. The hosted login might not show an interactive consent
-screen for those app grants, so operators must review the exact scope list
-reported by `okta-start`, `okta-status`, and `okta-oauth-login` before
-authentication.
+The default OIDC scope set is limited to identity data. Read-only organization
+access must be selected explicitly and remains subject to both the OIDC
+application's granted scopes and the signed-in user's Okta roles or resource
+assignments.
 
-## Operational guidance
+## Data boundaries
 
-- Review and pin the source revision before installing the server.
-- Register only the required loopback redirect URI
-  (`http://localhost:8749/callback` by default) on the Okta application.
-- Assign the OIDC application to the smallest practical set of users or groups.
-- Start with `openid profile email offline_access`; add individual `okta.*`
-  read scopes only when their tools are needed.
-- Add the optional `groups` identity scope only when `my-groups` is needed, and
-  configure the corresponding ID-token `groups` claim on the Okta application.
-- Keep local configuration and token files readable only by the current OS
-  user. The token cache is a local JSON file containing live bearer credentials,
-  not an OS credential-vault entry. Never commit, upload, or paste it into an
-  AI chat.
-- Verify the hosted sign-in page uses the exact configured Okta origin before
-  entering credentials or MFA values.
-- Run `okta-workspace-mcp logout` and revoke the OIDC grant in Okta when access
-  is no longer required.
-- In `stdio` mode, write protocol messages only to `stdout`; send diagnostics to
-  `stderr` so logging cannot corrupt the MCP connection.
-- Browser Session mode must remain explicit, loopback-only, and redacted. Its
-  proof may record cookie objects and HttpOnly metadata, but every
-  `value` must be exactly `[REDACTED]`. Its OAuth proof may record a one-way
-  token fingerprint and controlled request results but never raw tokens,
-  replayable Cookie-Editor files, Netscape jars, cookie headers, or
-  authorization headers. The collector keeps one proof of each type by default
-  and rejects credential-bearing fields.
-- A live Browser Session uses a temporary isolated profile owned by a child
-  worker. Raw cookies remain inside that worker/browser boundary. Control uses
-  private process IPC, not an HTTP control service. The current tool surface is
-  limited to sanitized snapshots, same-origin navigation, and same-origin
-  read-only `GET` requests under `/api/v1/`; it exposes no arbitrary JavaScript
-  or write-capable browser action.
-- Redacted Browser Session proofs are refreshed after authentication or
-  reauthentication, on detected session rotation, every five minutes while
-  authenticated, and once more during an orderly close. The temporary profile
-  is deleted on explicit close, MCP shutdown, manual browser close, or the
-  30-minute inactivity timeout.
+- Raw browser cookie values remain inside the isolated browser worker.
+- Cookie metadata records set every `value` field to `[REDACTED]`.
+- Raw OAuth access tokens, refresh tokens, and ID tokens are not returned by MCP
+  tools or sent to the local metadata service.
+- OAuth metadata may include a one-way SHA-256 token fingerprint and read-only
+  request status information.
+- The metadata service listens only on `127.0.0.1` and retains one record of
+  each type by default.
+- Browser control uses private child-process IPC rather than an HTTP control
+  interface.
+- Browser tools support sanitized snapshots, same-origin navigation, and
+  read-only `GET` requests under `/api/v1/` only.
 
-## Reporting a vulnerability
+## Local files
 
-Report suspected vulnerabilities privately through GitHub's private
-vulnerability-reporting feature. Do not open a public issue containing access
-tokens, refresh tokens, authorization codes, tenant details, user data, or other
-live credentials.
+The application stores configuration under the current user's
+`.okta-workspace-mcp` directory:
 
-Include a minimal reproduction using dummy values or an isolated test tenant.
-Immediately revoke any credential accidentally exposed during testing.
+- `startup.json` contains the selected mode and Okta organization.
+- `config.json` contains public OIDC client settings.
+- `tokens.json` contains the local OAuth token cache.
+
+Restrict these files to the current OS user. The token cache is a local JSON
+file rather than an operating-system credential-vault entry. Do not commit,
+upload, copy into issue reports, or paste its contents into chat systems.
+
+The Browser Session uses a temporary profile managed by a child process. The
+profile is removed on explicit close, MCP shutdown, manual browser close, or
+the 30-minute inactivity timeout.
+
+## Recommended configuration
+
+- Review and pin the source revision before installation.
+- Register only the required loopback redirect URI. The default is
+  `http://localhost:8749/callback`.
+- Assign the OIDC application only to the intended users or groups.
+- Begin with `openid profile email offline_access`.
+- Add individual `okta.*` read scopes only for tools that require them.
+- Add the optional `groups` scope only when `my-groups` is needed, and configure
+  the corresponding ID-token claim in Okta.
+- Review the organization, client ID, scopes, and callback shown by
+  `okta-start` or `okta-status` before authenticating.
+- Confirm that the browser sign-in page uses the configured Okta origin before
+  entering credentials or MFA information.
+- Run `okta-workspace-mcp logout` when OIDC access is no longer needed.
+- Use `okta-reset` when saved MCP authentication settings should be removed.
+- Keep protocol output on `stdout` and diagnostics on `stderr` when operating
+  in stdio mode.
+
+## Browser Session lifecycle
+
+The local service refreshes redacted Browser Session metadata:
+
+- After successful authentication.
+- After reauthentication or a detected session change.
+- Every five minutes while the session remains authenticated.
+- During an orderly browser close when the session is still available.
+
+The local service rejects records containing non-redacted cookie values or
+fields intended to carry raw credentials.
+
+## Reporting a problem
+
+Report security or privacy issues privately through GitHub's private
+vulnerability-reporting feature. Do not include tokens, authorization codes,
+tenant-specific user data, cookies, or other credentials in a public issue.
+
+Use dummy values or a dedicated development organization in reproduction
+steps. If a credential is included accidentally, revoke it immediately and
+replace it before continuing.
 
 ## Supported versions
 
 Until tagged releases are available, only the latest commit on `main` is
-maintained. Pin the exact revision you review and run.
+maintained. Pin the exact revision used for a deployment.
